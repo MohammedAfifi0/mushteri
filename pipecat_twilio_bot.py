@@ -39,6 +39,7 @@ from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.services.groq.llm import GroqLLMService
 from pipecat.services.groq.tts import GroqTTSService
 from pipecat.services.groq.stt import GroqSTTService
+from pipecat.services.azure import AzureSTTService
 
 # Pipecat processors
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -221,16 +222,19 @@ async def run_bot(websocket: WebSocket):
         ),
     )
     
-    # Initialize Groq STT (Whisper) for Arabic – closer to Vapi-style configs
-    # This removes one extra network hop (Azure) and usually gives faster, cleaner text.
-    if not GROQ_API_KEY:
-        raise ValueError("GROQ_API_KEY environment variable is required")
+    # Initialize Azure STT for Arabic (KSA)
+    if not AZURE_SPEECH_KEY:
+        raise ValueError("AZURE_SPEECH_API_KEY or AZURE_SPEECH_KEY environment variable is required")
+    if not AZURE_SPEECH_REGION:
+        raise ValueError("AZURE_SPEECH_REGION environment variable is required")
 
-    logger.info("Using Groq STT (whisper-large-v3-turbo, language=ar)")
-    stt = GroqSTTService(
-        api_key=GROQ_API_KEY,
-        model="whisper-large-v3-turbo",
-        language="ar",  # focus on Arabic / Gulf
+    # Use ar-SA as requested (Saudi Arabic)
+    azure_language = os.getenv("AZURE_SPEECH_LANGUAGE", "ar-SA")
+    logger.info(f"Using Azure STT (language={azure_language})")
+    stt = AzureSTTService(
+        api_key=AZURE_SPEECH_KEY,
+        region=AZURE_SPEECH_REGION,
+        language=azure_language,
     )
     
     # Initialize Groq LLM (openai/gpt-oss-120b) for high-quality, low-latency responses
@@ -527,7 +531,7 @@ if __name__ == "__main__":
     logger.info(f"Starting Mushtari Voice Agent on port {port}")
     logger.info("Configuration:")
     logger.info(f"  - LLM: Groq openai/gpt-oss-120b")
-    logger.info(f"  - STT: Groq Whisper (whisper-large-v3-turbo, ar)")
+    logger.info(f"  - STT: Azure Speech Services ({os.getenv('AZURE_SPEECH_LANGUAGE', 'ar-SA')})")
     logger.info(f"  - TTS: Groq PlayAI Arabic (playai-tts-arabic, Nasser-PlayAI)")
     logger.info(f"  - VAD: Silero (confidence=0.5, start=0.25s, stop=0.4s)")
     
