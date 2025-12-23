@@ -9,6 +9,7 @@ import os
 import asyncio
 import io
 import wave
+import time
 import numpy as np
 from scipy import signal
 from datetime import datetime
@@ -448,12 +449,13 @@ async def run_bot(websocket: WebSocket):
         text_aggregator=SimpleTextAggregator()
     )
     
-    # Custom frame logger - minimal logging for essential info only
+    # Custom frame logger with deduplication - minimal logging for essential info only
     class FrameLogger(FrameProcessor):
         """Log essential frames: STT transcription, LLM output, TTS output"""
         def __init__(self, logger_name: str):
             super().__init__()
             self.logger_name = logger_name
+            self._seen_frames = set()  # Track seen frames to prevent duplicates
             
         async def process_frame(self, frame, direction):
             await super().process_frame(frame, direction)
@@ -466,7 +468,14 @@ async def run_bot(websocket: WebSocket):
                     # LLM output (aggregated text)
                     text = getattr(frame, 'text', '')
                     if text:
-                        logger.info(f"🤖 LLM: {text}")
+                        # Create a unique identifier for this frame to prevent duplicate logging
+                        frame_id = id(frame)
+                        if frame_id not in self._seen_frames:
+                            self._seen_frames.add(frame_id)
+                            logger.info(f"🤖 LLM: {text}")
+                        # Clean up old frame IDs periodically to prevent memory leak
+                        if len(self._seen_frames) > 100:
+                            self._seen_frames.clear()
                 elif isinstance(frame, TTSTextFrame):
                     logger.info(f"🔊 TTS: {frame.text}")
             except Exception as e:
@@ -480,7 +489,47 @@ async def run_bot(websocket: WebSocket):
     logger_llm_out = FrameLogger("LLM")  # Log LLM aggregated output
     logger_tts_out = FrameLogger("TTS")  # Log TTS output
     
-    # Build the pipeline – STT → context → LLM (streaming) → sentence aggregation → TTS
+    # Frame deduplication processor to prevent duplicate AggregatedTextFrames from being sent to TTS
+    class FrameDeduplicator(FrameProcessor):
+        """Prevent duplicate AggregatedTextFrames from being processed multiple times"""
+        def __init__(self):
+            super().__init__()
+            self._recent_frames = {}  # Track recent frames by text content
+            self._max_age_seconds = 2.0  # Consider frames duplicate if within 2 seconds
+            
+        async def process_frame(self, frame, direction):
+            await super().process_frame(frame, direction)
+            
+            # Only deduplicate AggregatedTextFrames (LLM output)
+            if isinstance(frame, AggregatedTextFrame):
+                text = getattr(frame, 'text', '').strip()
+                if text:
+                    current_time = time.time()
+                    
+                    # Check if we've seen this exact text recently
+                    if text in self._recent_frames:
+                        last_seen = self._recent_frames[text]
+                        if current_time - last_seen < self._max_age_seconds:
+                            # This is a duplicate, skip it
+                            logger.debug(f"Skipping duplicate frame: {text[:50]}...")
+                            return  # Don't push the frame
+                    
+                    # Record this frame
+                    self._recent_frames[text] = current_time
+                    
+                    # Clean up old entries to prevent memory leak
+                    if len(self._recent_frames) > 50:
+                        cutoff_time = current_time - self._max_age_seconds
+                        self._recent_frames = {
+                            k: v for k, v in self._recent_frames.items() 
+                            if v > cutoff_time
+                        }
+            
+            await self.push_frame(frame, direction)
+    
+    frame_deduplicator = FrameDeduplicator()
+    
+    # Build the pipeline – STT → context → LLM (streaming) → sentence aggregation → deduplication → TTS
     pipeline = Pipeline(
         [
             transport.input(),                 # Audio input from Twilio
@@ -489,6 +538,7 @@ async def run_bot(websocket: WebSocket):
             context_aggregator.user(),         # User → context
             llm,                               # Groq openai/gpt-oss-120b (streams LLMTextFrames)
             llm_text_processor,                # Aggregate LLMTextFrames into AggregatedTextFrames (sentences)
+            frame_deduplicator,                # Prevent duplicate frames from reaching TTS
             logger_llm_out,                    # Log LLM aggregated output
             tts,                               # Groq TTS processes AggregatedTextFrames → creates TTSAudioRawFrames + TTSTextFrames
             logger_tts_out,                    # Log TTS output
@@ -500,6 +550,7 @@ async def run_bot(websocket: WebSocket):
     # Create task with interruption support and optimized for low latency
     # Following Twilio docs: Set audio_out_sample_rate to 8000 (Twilio requirement)
     # Pipeline will automatically resample Groq TTS 48kHz output to 8kHz for Twilio
+    # Increase idle timeout for production (30 minutes) to prevent premature cancellation
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
@@ -509,11 +560,22 @@ async def run_bot(websocket: WebSocket):
             enable_metrics=True,          # Track performance metrics
             enable_usage_metrics=True,    # Track token usage
         ),
+        cancel_on_idle_timeout=True,      # Enable idle timeout as safety net
+        idle_timeout_seconds=1800,        # 30 minutes - long enough for real calls
     )
     
     
     # Run the pipeline
     runner = PipelineRunner()
+    
+    # Add event handler for client disconnection to properly cancel pipeline
+    @transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(transport, client):
+        logger.info("Client disconnected - cancelling pipeline task")
+        try:
+            await task.cancel()
+        except Exception as e:
+            logger.error(f"Error cancelling task on disconnect: {e}")
     
     try:
         # Start pipeline in background
@@ -558,6 +620,20 @@ async def run_bot(websocket: WebSocket):
     except Exception as e:
         logger.error(f"Pipeline error: {e}", exc_info=True)
     finally:
+        # Ensure task is cancelled if still running
+        try:
+            if not task.is_finished():
+                logger.info("Task still running, cancelling...")
+                await task.cancel()
+        except Exception as e:
+            logger.debug(f"Error cancelling task in finally: {e}")
+        
+        # Wait a moment for cleanup
+        try:
+            await asyncio.sleep(0.5)
+        except Exception:
+            pass
+        
         # Save conversation summary when call ends
         if call_sid:
             try:
@@ -707,9 +783,17 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         logger.info("Closing WebSocket connection")
         try:
-            await websocket.close()
+            # Check if WebSocket is still open before closing
+            # FastAPI WebSocket has a client_state attribute
+            if hasattr(websocket, 'client_state') and websocket.client_state.name == 'CONNECTED':
+                await websocket.close()
+            elif not hasattr(websocket, 'client_state'):
+                # Fallback: try to close anyway if state check not available
+                await websocket.close()
         except Exception as e:
-            logger.error(f"Error closing WebSocket: {e}")
+            # Ignore errors if WebSocket is already closed
+            if "already closed" not in str(e).lower() and "response already completed" not in str(e).lower():
+                logger.debug(f"Error closing WebSocket (likely already closed): {e}")
 
 
 if __name__ == "__main__":
