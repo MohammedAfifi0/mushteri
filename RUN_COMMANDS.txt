@@ -1,0 +1,90 @@
+===========================================
+MUSHTARI VOICE AGENT - RUN COMMANDS
+===========================================
+
+STEP 1: Start ngrok (in Terminal/Command Prompt #1)
+-----------------------------------------------------
+This exposes your local server to Twilio
+
+ngrok http 8765
+
+After running this, you'll get a URL like:
+  https://abc123.ngrok-free.app
+
+Copy this URL - you'll need it for Twilio webhook configuration.
+
+
+STEP 2: Run the Bot (in Terminal/Command Prompt #2)
+------------------------------------------------------
+Make sure you're in the project directory first:
+
+cd "C:\Users\96550\Desktop\voice agent try"
+
+Then run:
+
+py -3.12 pipecat_twilio_bot.py
+
+(Or if you have Python 3.11 or 3.10, use: py -3.11 or py -3.10)
+
+The bot will start on port 8765 and wait for Twilio connections.
+
+
+STEP 3: Configure Twilio Webhook
+---------------------------------
+In your Twilio Console:
+1. Go to Phone Numbers > Manage > Active Numbers
+   (Or visit: https://console.twilio.com/us1/develop/phone-numbers/manage/incoming)
+
+2. Click on your Twilio phone number
+
+3. Scroll down to "Voice & Fax" section:
+   - A CALL COMES IN:
+     * Webhook URL: https://archipelagic-cirriform-ilene.ngrok-free.dev/webhook
+     * HTTP Method: POST
+   
+   - CALL STATUS CHANGES:
+     * (Leave empty or use same webhook)
+
+4. Click "Save" at the bottom of the page
+
+YOUR SPECIFIC WEBHOOK URL:
+  https://archipelagic-cirriform-ilene.ngrok-free.dev/webhook
+
+
+IMPORTANT NOTES:
+----------------
+- Keep BOTH terminals open (ngrok and bot) while testing
+- The ngrok URL changes each time you restart ngrok (unless you have a paid plan)
+- Make sure your .env file has all required API keys:
+  * GROQ_API_KEY
+  * AZURE_SPEECH_KEY
+  * AZURE_SPEECH_REGION
+  * TWILIO_ACCOUNT_SID (optional, for advanced features)
+  * TWILIO_AUTH_TOKEN (optional, for advanced features)
+
+- If you get "port already in use" error, either:
+  * Stop the other process using port 8765, OR
+  * Set PORT environment variable to a different port:
+    set PORT=8766
+    py -3.12 pipecat_twilio_bot.py
+  (Then update ngrok to forward that port: ngrok http 8766)
+
+
+QUICK START (Copy-Paste Ready):
+--------------------------------
+
+Terminal 1 (ngrok):
+  ngrok http 8765
+
+Terminal 2 (bot):
+  cd "C:\Users\96550\Desktop\voice agent try"
+  py -3.12 pipecat_twilio_bot.py
+
+
+TROUBLESHOOTING:
+----------------
+- Bot not responding? Check both terminals for error messages
+- Connection refused? Make sure ngrok is running and forwarding port 8765
+- Audio issues? Check that Azure Speech and Groq API keys are valid
+- "Module not found" errors? Install dependencies: py -3.12 -m pip install -r requirements.txt
+

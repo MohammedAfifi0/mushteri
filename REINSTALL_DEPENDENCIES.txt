@@ -1,0 +1,43 @@
+===========================================
+REINSTALL DEPENDENCIES - STEP BY STEP
+===========================================
+
+STEP 1: Uninstall all packages
+--------------------------------
+Run this command to uninstall pipecat and related packages:
+
+py -3.12 -m pip uninstall -y pipecat-ai fastapi uvicorn python-dotenv loguru groq scipy numpy azure-cognitiveservices-speech daily-python aiohttp websockets
+
+(If it asks for confirmation, it will auto-confirm with -y flag)
+
+
+STEP 2: Clear pip cache (optional but recommended)
+---------------------------------------------------
+py -3.12 -m pip cache purge
+
+
+STEP 3: Reinstall from requirements.txt
+-----------------------------------------
+py -3.12 -m pip install -r requirements.txt
+
+
+QUICK COPY-PASTE (run these in order):
+---------------------------------------
+
+py -3.12 -m pip uninstall -y pipecat-ai fastapi uvicorn python-dotenv loguru groq scipy numpy azure-cognitiveservices-speech daily-python aiohttp websockets
+
+py -3.12 -m pip cache purge
+
+py -3.12 -m pip install -r requirements.txt
+
+
+ALTERNATIVE: If you want to be more thorough
+---------------------------------------------
+Uninstall everything Python-related (be careful with this):
+
+py -3.12 -m pip freeze > installed_packages.txt
+py -3.12 -m pip uninstall -y -r installed_packages.txt
+py -3.12 -m pip install -r requirements.txt
+
+(Then delete installed_packages.txt after you're done)
+

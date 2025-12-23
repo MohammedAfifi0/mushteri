@@ -1,0 +1,10 @@
+pipecat-ai[azure,groq,silero]
+fastapi
+uvicorn[standard]
+python-dotenv
+loguru
+groq
+scipy
+numpy
+
+

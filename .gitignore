@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.env
+.env.local
+.venv/
+venv/
+.idea/
+.vscode/
+
+# Local docs / examples (not needed in deployed app)
+docs-main/
+pcc-groq-llama-main/
+
+
+
