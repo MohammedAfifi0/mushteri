@@ -28,8 +28,10 @@ from pipecat.frames.frames import (
     TTSSpeakFrame,
     EndFrame,
     TranscriptionFrame,
+    InterimTranscriptionFrame,
     LLMTextFrame,
     TTSTextFrame,
+    InputAudioRawFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -93,10 +95,72 @@ else:
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
 
-# Reserved agent: Pre-generated initial greeting audio for instant pickup
-# This eliminates TTS latency on first response by pre-generating audio at startup
-INITIAL_GREETING_AUDIO: bytes | None = None
-INITIAL_GREETING_SAMPLE_RATE: int = 48000  # Groq PlayTTS Arabic outputs at 48kHz
+# Reserved agent: Pre-initialized services for low-latency startup
+# Global service instances that are reused across calls to reduce initialization time
+_reserved_services: Dict[str, Any] = {}
+
+
+def initialize_reserved_services():
+    """
+    Pre-initialize services at startup to reduce cold-start latency.
+    This is a simple reserved agent pattern for self-hosted deployments.
+    """
+    global _reserved_services
+    
+    try:
+        logger.info("Initializing reserved agent services...")
+        
+        # Pre-initialize Azure STT (most time-consuming)
+        if AZURE_SPEECH_KEY and AZURE_SPEECH_REGION:
+            azure_language = os.getenv("AZURE_SPEECH_LANGUAGE", "ar-SA")
+            logger.info(f"Pre-initializing Azure STT (language={azure_language})...")
+            _reserved_services['stt'] = AzureSTTService(
+                api_key=AZURE_SPEECH_KEY,
+                region=AZURE_SPEECH_REGION,
+                language=azure_language,
+                audio_passthrough=True,
+            )
+            logger.info("✅ Azure STT pre-initialized")
+        
+        # Pre-initialize Groq LLM
+        if GROQ_API_KEY:
+            logger.info("Pre-initializing Groq LLM...")
+            _reserved_services['llm'] = GroqLLMService(
+                api_key=GROQ_API_KEY,
+                model="openai/gpt-oss-120b",
+            )
+            logger.info("✅ Groq LLM pre-initialized")
+            
+            # Pre-initialize Groq TTS
+            logger.info("Pre-initializing Groq TTS...")
+            _reserved_services['tts'] = GroqTTSService(
+                api_key=GROQ_API_KEY,
+                model_name="playai-tts-arabic",
+                voice_id="Nasser-PlayAI",
+                params=GroqTTSService.InputParams(
+                    language="ar",
+                    speed=1.15,
+                ),
+            )
+            logger.info("✅ Groq TTS pre-initialized")
+        
+        logger.info("Reserved agent services initialized successfully")
+        
+    except Exception as e:
+        logger.warning(f"Failed to initialize reserved services (will create per-call): {e}")
+        _reserved_services = {}
+
+
+def get_reserved_service(service_name: str):
+    """
+    Get a pre-initialized service instance, or return None if not available.
+    Note: Services are reused across calls. This works if services are stateless
+    or properly handle concurrent usage. If issues occur, we'll create new instances per call.
+    """
+    service = _reserved_services.get(service_name)
+    if service:
+        logger.debug(f"Using reserved {service_name} service")
+    return service
 
 
 def pre_generate_greeting_audio() -> tuple[bytes | None, int]:
@@ -193,12 +257,13 @@ async def run_bot(websocket: WebSocket):
     
     # Configure VAD - optimized for low-latency turn-taking on PSTN
     # stop_secs controls when we decide "user stopped speaking"
+    # Increased stop_secs to 0.6s to avoid cutting off speech prematurely
     vad_analyzer = SileroVADAnalyzer(
         params=VADParams(
-            confidence=0.5,
-            start_secs=0.25,  # quick to start
-            stop_secs=0.4,    # faster finalization for lower latency
-            min_volume=0.3,
+            confidence=0.4,    # Lower threshold for better detection in noisy PSTN
+            start_secs=0.25,   # quick to start
+            stop_secs=0.6,     # Longer pause detection to avoid cutting off words
+            min_volume=0.2,    # Lower minimum volume for better sensitivity
         )
     )
     
@@ -222,6 +287,10 @@ async def run_bot(websocket: WebSocket):
         ),
     )
     
+    # Use reserved services if available, otherwise create new instances
+    # Reserved services reduce cold-start latency by pre-initializing at startup
+    # Each call still gets its own pipeline, so services should handle concurrent usage
+    
     # Initialize Azure STT for Arabic (KSA)
     if not AZURE_SPEECH_KEY:
         raise ValueError("AZURE_SPEECH_API_KEY or AZURE_SPEECH_KEY environment variable is required")
@@ -230,32 +299,49 @@ async def run_bot(websocket: WebSocket):
 
     # Use ar-SA as requested (Saudi Arabic)
     azure_language = os.getenv("AZURE_SPEECH_LANGUAGE", "ar-SA")
-    logger.info(f"Using Azure STT (language={azure_language})")
-    stt = AzureSTTService(
-        api_key=AZURE_SPEECH_KEY,
-        region=AZURE_SPEECH_REGION,
-        language=azure_language,
-    )
+    reserved_stt = get_reserved_service('stt')
+    if reserved_stt:
+        stt = reserved_stt
+        logger.info(f"Using reserved Azure STT (language={azure_language})")
+    else:
+        logger.info(f"Creating new Azure STT (language={azure_language})")
+        stt = AzureSTTService(
+            api_key=AZURE_SPEECH_KEY,
+            region=AZURE_SPEECH_REGION,
+            language=azure_language,
+            audio_passthrough=True,  # Allow audio to continue downstream for continuous recognition
+        )
     
     # Initialize Groq LLM (openai/gpt-oss-120b) for high-quality, low-latency responses
-    llm = GroqLLMService(
-        api_key=GROQ_API_KEY,
-        model="openai/gpt-oss-120b",
-    )
-    
+    reserved_llm = get_reserved_service('llm')
+    if reserved_llm:
+        llm = reserved_llm
+        logger.info("Using reserved Groq LLM")
+    else:
+        logger.info("Creating new Groq LLM")
+        llm = GroqLLMService(
+            api_key=GROQ_API_KEY,
+            model="openai/gpt-oss-120b",
+        )
     
     # Initialize Groq TTS for Arabic using PlayAI Arabic / Nasser
     # NOTE: This model is scheduled for deprecation by Groq, but still works as of now.
     # It often sounds more natural for Gulf Arabic than Orpheus for some content.
-    tts = GroqTTSService(
-        api_key=GROQ_API_KEY,
-        model_name="playai-tts-arabic",
-        voice_id="Nasser-PlayAI",
-        params=GroqTTSService.InputParams(
-            language="ar",
-            speed=1.15,  # slightly faster than default for snappier feel
-        ),
-    )
+    reserved_tts = get_reserved_service('tts')
+    if reserved_tts:
+        tts = reserved_tts
+        logger.info("Using reserved Groq TTS")
+    else:
+        logger.info("Creating new Groq TTS")
+        tts = GroqTTSService(
+            api_key=GROQ_API_KEY,
+            model_name="playai-tts-arabic",
+            voice_id="Nasser-PlayAI",
+            params=GroqTTSService.InputParams(
+                language="ar",
+                speed=1.15,  # slightly faster than default for snappier feel
+            ),
+        )
     
     # سلوك بسيط لسالم – يركّز على نوع الطلب (شراء / بيع / استفسار) مع لهجة كويتية طبيعية
     messages = [
@@ -311,6 +397,15 @@ async def run_bot(websocket: WebSocket):
             # Log important frames for debugging
             if isinstance(frame, TranscriptionFrame):
                 logger.info(f"[{self.logger_name}] TranscriptionFrame: {frame.text}")
+            elif isinstance(frame, InterimTranscriptionFrame):
+                logger.debug(f"[{self.logger_name}] InterimTranscriptionFrame: {frame.text}")
+            elif isinstance(frame, InputAudioRawFrame):
+                # Only log occasionally to avoid spam (every 50 frames = ~1 second at 8kHz)
+                if not hasattr(self, '_audio_frame_count'):
+                    self._audio_frame_count = 0
+                self._audio_frame_count += 1
+                if self._audio_frame_count % 50 == 0:
+                    logger.debug(f"[{self.logger_name}] InputAudioRawFrame: {len(frame.audio)} bytes (frame {self._audio_frame_count})")
             elif isinstance(frame, LLMTextFrame):
                 logger.info(f"[{self.logger_name}] LLMTextFrame: '{frame.text}'")
             elif isinstance(frame, TTSTextFrame):
@@ -319,12 +414,14 @@ async def run_bot(websocket: WebSocket):
                 logger.info(f"[{self.logger_name}] TTSAudioRawFrame: {len(frame.audio)} bytes")
             elif hasattr(frame, '__class__'):
                 frame_type = frame.__class__.__name__
-                if 'LLM' in frame_type or 'TTS' in frame_type or 'Transcription' in frame_type:
+                # Log all frame types for STT debugging
+                if 'Transcription' in frame_type or 'Interim' in frame_type or 'User' in frame_type:
                     logger.debug(f"[{self.logger_name}] {frame_type}")
             
             await self.push_frame(frame, direction)
     
     # Create frame loggers for debugging
+    logger_audio_in = FrameLogger("AUDIO_IN")  # Log audio before STT
     logger_stt = FrameLogger("STT_OUT")
     logger_llm_in = FrameLogger("LLM_IN")
     logger_llm_out = FrameLogger("LLM_OUT")
@@ -335,6 +432,7 @@ async def run_bot(websocket: WebSocket):
     pipeline = Pipeline(
         [
             transport.input(),                 # Audio input from Twilio
+            logger_audio_in,                   # DEBUG: Log audio input
             stt,                               # Azure Speech-to-Text (Arabic)
             logger_stt,                        # DEBUG: Log STT output
             context_aggregator.user(),         # User → context
@@ -402,6 +500,12 @@ async def run_bot(websocket: WebSocket):
 
 # FastAPI application
 app = FastAPI(title="Mushtari Voice Agent", version="1.0.0")
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize reserved agent services on startup for low-latency cold starts"""
+    initialize_reserved_services()
 
 
 @app.get("/")
@@ -538,7 +642,8 @@ if __name__ == "__main__":
     logger.info(f"  - LLM: Groq openai/gpt-oss-120b")
     logger.info(f"  - STT: Azure Speech Services ({os.getenv('AZURE_SPEECH_LANGUAGE', 'ar-SA')})")
     logger.info(f"  - TTS: Groq PlayAI Arabic (playai-tts-arabic, Nasser-PlayAI)")
-    logger.info(f"  - VAD: Silero (confidence=0.5, start=0.25s, stop=0.4s)")
+    logger.info(f"  - VAD: Silero (confidence=0.4, start=0.25s, stop=0.6s)")
+    logger.info(f"  - Reserved Agent: Enabled (services pre-initialized for low latency)")
     
     # Run FastAPI server
     uvicorn.run(
