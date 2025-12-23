@@ -36,9 +36,9 @@ from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 
 # Pipecat services
-from pipecat.services.groq import GroqLLMService, GroqTTSService
+from pipecat.services.groq.llm import GroqLLMService
+from pipecat.services.groq.tts import GroqTTSService
 from pipecat.services.groq.stt import GroqSTTService
-from pipecat.services.azure import AzureSTTService
 
 # Pipecat processors
 from pipecat.processors.aggregators.llm_context import LLMContext
