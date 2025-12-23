@@ -432,8 +432,9 @@ async def run_bot(websocket: WebSocket):
                 elif isinstance(frame, LLMTextFrame):
                     logger.debug(f"[{self.logger_name}] LLMTextFrame: '{frame.text}'")
                 elif isinstance(frame, AggregatedTextFrame):
-                    frame_type = getattr(frame, 'type', 'sentence')
-                    logger.info(f"[{self.logger_name}] AggregatedTextFrame: '{frame.text}' (type: {frame_type})")
+                    # Safely access text attribute
+                    text = getattr(frame, 'text', '')
+                    logger.info(f"[{self.logger_name}] AggregatedTextFrame: '{text}'")
                 elif isinstance(frame, TTSTextFrame):
                     logger.info(f"[{self.logger_name}] TTSTextFrame: '{frame.text}'")
                 elif isinstance(frame, TTSAudioRawFrame):
