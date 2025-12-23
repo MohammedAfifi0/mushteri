@@ -416,31 +416,36 @@ async def run_bot(websocket: WebSocket):
         async def process_frame(self, frame, direction):
             await super().process_frame(frame, direction)
             
-            # Log important frames for debugging
-            if isinstance(frame, TranscriptionFrame):
-                logger.info(f"[{self.logger_name}] TranscriptionFrame: {frame.text}")
-            elif isinstance(frame, InterimTranscriptionFrame):
-                logger.debug(f"[{self.logger_name}] InterimTranscriptionFrame: {frame.text}")
-            elif isinstance(frame, InputAudioRawFrame):
-                # Only log occasionally to avoid spam (every 50 frames = ~1 second at 8kHz)
-                if not hasattr(self, '_audio_frame_count'):
-                    self._audio_frame_count = 0
-                self._audio_frame_count += 1
-                if self._audio_frame_count % 50 == 0:
-                    logger.debug(f"[{self.logger_name}] InputAudioRawFrame: {len(frame.audio)} bytes (frame {self._audio_frame_count})")
-            elif isinstance(frame, LLMTextFrame):
-                logger.debug(f"[{self.logger_name}] LLMTextFrame: '{frame.text}'")
-            elif isinstance(frame, AggregatedTextFrame):
-                logger.info(f"[{self.logger_name}] AggregatedTextFrame: '{frame.text}' (type: {frame.type})")
-            elif isinstance(frame, TTSTextFrame):
-                logger.info(f"[{self.logger_name}] TTSTextFrame: '{frame.text}'")
-            elif isinstance(frame, TTSAudioRawFrame):
-                logger.debug(f"[{self.logger_name}] TTSAudioRawFrame: {len(frame.audio)} bytes")
-            elif hasattr(frame, '__class__'):
-                frame_type = frame.__class__.__name__
-                # Log all frame types for STT debugging
-                if 'Transcription' in frame_type or 'Interim' in frame_type or 'User' in frame_type:
-                    logger.debug(f"[{self.logger_name}] {frame_type}")
+            # Log important frames for debugging (errors in logging shouldn't break pipeline)
+            try:
+                if isinstance(frame, TranscriptionFrame):
+                    logger.info(f"[{self.logger_name}] TranscriptionFrame: {frame.text}")
+                elif isinstance(frame, InterimTranscriptionFrame):
+                    logger.debug(f"[{self.logger_name}] InterimTranscriptionFrame: {frame.text}")
+                elif isinstance(frame, InputAudioRawFrame):
+                    # Only log occasionally to avoid spam (every 50 frames = ~1 second at 8kHz)
+                    if not hasattr(self, '_audio_frame_count'):
+                        self._audio_frame_count = 0
+                    self._audio_frame_count += 1
+                    if self._audio_frame_count % 50 == 0:
+                        logger.debug(f"[{self.logger_name}] InputAudioRawFrame: {len(frame.audio)} bytes (frame {self._audio_frame_count})")
+                elif isinstance(frame, LLMTextFrame):
+                    logger.debug(f"[{self.logger_name}] LLMTextFrame: '{frame.text}'")
+                elif isinstance(frame, AggregatedTextFrame):
+                    frame_type = getattr(frame, 'type', 'sentence')
+                    logger.info(f"[{self.logger_name}] AggregatedTextFrame: '{frame.text}' (type: {frame_type})")
+                elif isinstance(frame, TTSTextFrame):
+                    logger.info(f"[{self.logger_name}] TTSTextFrame: '{frame.text}'")
+                elif isinstance(frame, TTSAudioRawFrame):
+                    logger.debug(f"[{self.logger_name}] TTSAudioRawFrame: {len(frame.audio)} bytes")
+                elif hasattr(frame, '__class__'):
+                    frame_type = frame.__class__.__name__
+                    # Log all frame types for STT debugging
+                    if 'Transcription' in frame_type or 'Interim' in frame_type or 'User' in frame_type:
+                        logger.debug(f"[{self.logger_name}] {frame_type}")
+            except Exception as e:
+                # Log error but don't break the pipeline
+                logger.warning(f"[{self.logger_name}] Error logging frame: {e}")
             
             await self.push_frame(frame, direction)
     
