@@ -542,8 +542,6 @@ async def run_bot(websocket: WebSocket):
             # Small delay to ensure pipeline is ready to receive frames
             await asyncio.sleep(0.1)
             await task.queue_frames(INITIAL_GREETING_FRAMES)
-            # Also queue TTSTextFrame so context aggregator knows greeting was spoken
-            await task.queue_frames([TTSTextFrame(text=greeting_text)])
             logger.info("✅ Greeting frames queued - user will hear greeting immediately")
         else:
             logger.warning("No pre-generated greeting frames available - using TTSSpeakFrame fallback")
