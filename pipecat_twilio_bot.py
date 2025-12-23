@@ -33,6 +33,7 @@ from pipecat.frames.frames import (
     AggregatedTextFrame,
     TTSTextFrame,
     InputAudioRawFrame,
+    LLMMessagesAppendFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -182,7 +183,7 @@ def pre_generate_greeting_frames() -> list[TTSAudioRawFrame] | None:
         client = Groq(api_key=GROQ_API_KEY)
         
         # Greeting text matching the system prompt
-        greeting_text = "هلا، معاك سالم من تطبيق مشتري، شلون أقدر أساعدك؟"
+        greeting_text = INITIAL_GREETING_TEXT
         
         # Use same TTS model/voice as the service (playai-tts-arabic with Nasser-PlayAI)
         # Note: Using Groq audio.speech API directly (same as TTS service uses internally)
@@ -253,8 +254,9 @@ def pre_generate_greeting_frames() -> list[TTSAudioRawFrame] | None:
         return None
 
 
-# Global storage for pre-generated greeting frames
+# Global storage for pre-generated greeting frames and text
 INITIAL_GREETING_FRAMES: list[TTSAudioRawFrame] | None = None
+INITIAL_GREETING_TEXT = "هلا، معاك سالم من تطبيق مشتري، شلون أقدر أساعدك؟"
 
 
 async def run_bot(websocket: WebSocket):
@@ -285,6 +287,23 @@ async def run_bot(websocket: WebSocket):
         f"Media stream started - Stream SID: {stream_sid}, "
         f"Call SID: {call_sid or 'N/A'}"
     )
+    
+    # Function to save lead data (will be connected to DB later)
+    def save_lead_data(call_sid: str, data: Dict[str, Any]):
+        """Save lead information to storage (temporary - will connect to DB async later)"""
+        if call_sid not in lead_storage:
+            lead_storage[call_sid] = {
+                "call_sid": call_sid,
+                "timestamp": datetime.now().isoformat(),
+                "lead_quality": None,  # "Hot" or "Cold"
+                "data": {}
+            }
+        lead_storage[call_sid]["data"].update(data)
+        logger.info(f"Lead data saved for {call_sid}: {data}")
+    
+    # Initialize lead data tracking for this call
+    if call_sid:
+        save_lead_data(call_sid, {"call_started": datetime.now().isoformat()})
     
     # Configure VAD - optimized for low-latency turn-taking on PSTN
     # Balance between quick response and not cutting off speech
@@ -381,23 +400,25 @@ async def run_bot(websocket: WebSocket):
             "role": "system",
             "content": (
                 "انت سالم، موظف استقبال ودود ومحترف في تطبيق مُشْتَري في الكويت.\n\n"
+                "**مهم جداً:**\n"
+                "- لقد قلت الترحيب الأولي بالفعل: 'هلا، معاك سالم من تطبيق مشتري، شلون أقدر أساعدك؟'\n"
+                "- لا تكرر الترحيب أو تعيد نفس الجملة. استمع لما يقوله المتصل ورد عليه بشكل طبيعي.\n\n"
                 "**الأسلوب واللهجة:**\n"
                 "- تكلم بلهجة كويتية طبيعية وبسيطة، بدون كلمات إنجليزية وبدون تشكيل.\n"
                 "- ردودك متوسطة الطول: ليست قصيرة جداً (مثل 'نعم' فقط) وليست طويلة جداً (أكثر من 3-4 جمل).\n"
                 "- خلك طبيعي ومريح، مثل محادثة عادية مع صديق أو زميل.\n"
                 "- استخدم تعابير كويتية طبيعية مثل 'هلا'، 'شلونك'، 'يعطيك العافية'.\n\n"
                 "**التدفق الطبيعي للمحادثة:**\n"
-                "- أول رد: 'هلا، معاك سالم من تطبيق مشتري، شلون أقدر أساعدك؟'\n"
                 "- استمع جيداً لما يقوله المتصل قبل الرد.\n"
                 "- إذا قال إنه يبي يبيع مشروع:\n"
                 "  * ابدأ بجملة تأكيد ودودة مثل 'ممتاز' أو 'زين'.\n"
-                "  * اسأله عن نوع المشروع (مطعم، كوفي، صالون، إلخ).\n"
-                "  * بعد ما يجيب، اسأله عن الموقع.\n"
-                "  * بعدين اسأله عن السعر التقريبي والربحية الشهرية.\n"
+                "  * اسأله عن نوع المشروع (مطعم، كوفي، صالون، إلخ) وسجّل المعلومات.\n"
+                "  * بعد ما يجيب، اسأله عن الموقع وسجّله.\n"
+                "  * بعدين اسأله عن السعر التقريبي والربحية الشهرية وسجّلها.\n"
                 "- إذا قال إنه يبي يشتري مشروع:\n"
                 "  * ابدأ بجملة تأكيد ودودة.\n"
-                "  * اسأله: 'أي نوع من المشاريع تبي تشتريه؟ مثلاً مطعم، كوفي، صالون، ولا شي ثاني؟'\n"
-                "  * بعد ما يجيب، اسأله عن ميزانيته المتوقعة.\n"
+                "  * اسأله: 'أي نوع من المشاريع تبي تشتريه؟ مثلاً مطعم، كوفي، صالون، ولا شي ثاني؟' وسجّل نوع المشروع.\n"
+                "  * بعد ما يجيب، اسأله عن ميزانيته المتوقعة وسجّلها.\n"
                 "- إذا بس يستفسر عن التطبيق:\n"
                 "  * جاوبه باختصار ووضوح (2-3 جمل كافية).\n"
                 "  * بعدين اسأله: 'حاب تشتري مشروع ولا تبيع مشروع؟'\n\n"
@@ -406,6 +427,7 @@ async def run_bot(websocket: WebSocket):
                 "- استعمل كلمات بسيطة وواضحة: تشتري، تبيع، تدير، تبي تعرض مشروعك.\n"
                 "- لا تطوّل في الرد، لكن أيضاً لا تقصر جداً. اهدف لرد طبيعي ومريح.\n"
                 "- خلك صبور ومتفهم. إذا المتصل محتاج توضيح، وضّح له بوضوح.\n"
+                "- لا تكرر نفس الجملة مرتين متتاليتين (مثل 'يعطيك العافية' أكثر من مرة).\n"
                 "- إذا المتصل قال شكراً أو مع السلامة، اختم بلطف: 'يعطيك العافية، تشرفنا فيك'.\n"
             ),
         },
@@ -422,19 +444,6 @@ async def run_bot(websocket: WebSocket):
     llm_text_processor = LLMTextProcessor(
         text_aggregator=SimpleTextAggregator()
     )
-    
-    # Function to save lead data (will be connected to DB later)
-    def save_lead_data(call_sid: str, data: Dict[str, Any]):
-        """Save lead information to storage (temporary - will connect to DB async later)"""
-        if call_sid not in lead_storage:
-            lead_storage[call_sid] = {
-                "call_sid": call_sid,
-                "timestamp": datetime.now().isoformat(),
-                "lead_quality": None,  # "Hot" or "Cold"
-                "data": {}
-            }
-        lead_storage[call_sid]["data"].update(data)
-        logger.info(f"Lead data saved for {call_sid}: {data}")
     
     # Custom frame logger to debug what's happening in the pipeline
     class FrameLogger(FrameProcessor):
@@ -535,19 +544,30 @@ async def run_bot(websocket: WebSocket):
         
         # Queue pre-generated greeting frames immediately to mask cold start latency
         # This plays the greeting while STT/LLM are initializing in the background
-        global INITIAL_GREETING_FRAMES
-        greeting_text = "هلا، معاك سالم من تطبيق مشتري، شلون أقدر أساعدك؟"
+        global INITIAL_GREETING_FRAMES, INITIAL_GREETING_TEXT
         if INITIAL_GREETING_FRAMES:
             logger.info(f"Queueing {len(INITIAL_GREETING_FRAMES)} pre-generated greeting frames...")
             # Small delay to ensure pipeline is ready to receive frames
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.15)  # Slightly longer delay to ensure pipeline is fully ready
             await task.queue_frames(INITIAL_GREETING_FRAMES)
-            logger.info("✅ Greeting frames queued - user will hear greeting immediately")
+            
+            # IMPORTANT: Add greeting to context so LLM knows it was already spoken
+            # This prevents the LLM from repeating the greeting
+            greeting_message = {"role": "assistant", "content": INITIAL_GREETING_TEXT}
+            await task.queue_frames([
+                LLMMessagesAppendFrame([greeting_message], run_llm=False)
+            ])
+            logger.info("✅ Greeting frames queued and added to context - LLM will not repeat greeting")
         else:
             logger.warning("No pre-generated greeting frames available - using TTSSpeakFrame fallback")
             # Fallback: use TTSSpeakFrame if pre-generation failed
-            await asyncio.sleep(0.1)
-            await task.queue_frames([TTSSpeakFrame(text=greeting_text)])
+            await asyncio.sleep(0.15)
+            await task.queue_frames([TTSSpeakFrame(text=INITIAL_GREETING_TEXT)])
+            # Add to context for fallback too
+            greeting_message = {"role": "assistant", "content": INITIAL_GREETING_TEXT}
+            await task.queue_frames([
+                LLMMessagesAppendFrame([greeting_message], run_llm=False)
+            ])
 
         # Wait for pipeline to complete (runs until call ends)
         # The transport will continue reading WebSocket messages in the background
