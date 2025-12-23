@@ -233,11 +233,10 @@ async def run_bot(websocket: WebSocket):
         language="ar",  # focus on Arabic / Gulf
     )
     
-    # Initialize Groq LLM (Llama 3.3 70B) for high-quality, low-latency responses
+    # Initialize Groq LLM (openai/gpt-oss-120b) for high-quality, low-latency responses
     llm = GroqLLMService(
         api_key=GROQ_API_KEY,
-        # IMPORTANT: 3.1 model is decommissioned; use 3.3 instead
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
     )
     
     
@@ -324,7 +323,7 @@ async def run_bot(websocket: WebSocket):
     logger_tts_out = FrameLogger("TTS_OUT")
     
     # Build the pipeline - STANDARD Pipecat streaming (no bridge needed)
-    # Groq Llama streams LLMTextFrames which Groq TTS can consume directly
+    # Groq GPT-OSS streams LLMTextFrames which Groq TTS can consume directly
     pipeline = Pipeline(
         [
             transport.input(),                 # Audio input from Twilio
@@ -332,7 +331,7 @@ async def run_bot(websocket: WebSocket):
             logger_stt,                        # DEBUG: Log STT output
             context_aggregator.user(),         # User → context
             logger_llm_in,                     # DEBUG: Log frames before LLM
-            llm,                               # Groq Llama 3.3 70B processes context → streams LLMTextFrames
+            llm,                               # Groq openai/gpt-oss-120b processes context → streams LLMTextFrames
             logger_llm_out,                    # DEBUG: Log LLM output
             logger_tts_in,                     # DEBUG: Log frames before TTS
             tts,                               # Groq TTS processes LLMTextFrames → creates TTSAudioRawFrames
@@ -527,10 +526,10 @@ if __name__ == "__main__":
     
     logger.info(f"Starting Mushtari Voice Agent on port {port}")
     logger.info("Configuration:")
-    logger.info(f"  - LLM: Groq Llama 3.3 70B (llama-3.3-70b-versatile)")
-    logger.info(f"  - STT: Azure Speech Services ({AZURE_SPEECH_LANGUAGE})")
-    logger.info(f"  - TTS: Groq Orpheus Arabic Saudi (sultan voice)")
-    logger.info(f"  - VAD: Silero (confidence=0.5, start=0.15s, stop=0.7s)")
+    logger.info(f"  - LLM: Groq openai/gpt-oss-120b")
+    logger.info(f"  - STT: Groq Whisper (whisper-large-v3-turbo, ar)")
+    logger.info(f"  - TTS: Groq PlayAI Arabic (playai-tts-arabic, Nasser-PlayAI)")
+    logger.info(f"  - VAD: Silero (confidence=0.5, start=0.25s, stop=0.4s)")
     
     # Run FastAPI server
     uvicorn.run(
