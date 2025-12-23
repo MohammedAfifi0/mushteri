@@ -50,7 +50,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
 )
 from pipecat.processors.aggregators.llm_text_processor import LLMTextProcessor
-from pipecat.processors.frame_processor import FrameProcessor
+from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 
 # Pipecat utilities
 from pipecat.utils.text.simple_text_aggregator import SimpleTextAggregator
@@ -466,7 +466,7 @@ async def run_bot(websocket: WebSocket):
                     text = getattr(frame, 'text', '')
                     logger.info(f"[{self.logger_name}] AggregatedTextFrame: '{text}'")
                 elif isinstance(frame, TTSTextFrame):
-                    logger.info(f"[{self.logger_name}] TTSTextFrame: '{frame.text}'")
+                    logger.info(f"[{self.logger_name}] TTSTextFrame: {frame.text}")
                 elif isinstance(frame, TTSAudioRawFrame):
                     logger.debug(f"[{self.logger_name}] TTSAudioRawFrame: {len(frame.audio)} bytes")
                 elif hasattr(frame, '__class__'):
@@ -480,6 +480,36 @@ async def run_bot(websocket: WebSocket):
             
             await self.push_frame(frame, direction)
     
+    # Custom processor to inject pre-generated greeting frames directly into audio output path
+    class GreetingFrameInjector(FrameProcessor):
+        """Injects pre-generated greeting frames directly into the audio output path"""
+        def __init__(self):
+            super().__init__()
+            self.greeting_frames: list[TTSAudioRawFrame] | None = None
+            self.greeting_text: str | None = None
+            self.greeting_sent = False
+            
+        async def inject_greeting_now(self, frames: list[TTSAudioRawFrame], text: str):
+            """Immediately inject greeting frames and text into the pipeline"""
+            if self.greeting_sent:
+                return
+            self.greeting_frames = frames
+            self.greeting_text = text
+            self.greeting_sent = True
+            logger.info(f"Immediately injecting {len(frames)} pre-generated greeting frames into audio output...")
+            # Send TTSTextFrame first so context aggregator knows what was said (prevents LLM from repeating it)
+            if text:
+                await self.push_frame(TTSTextFrame(text=text), FrameDirection.DOWNSTREAM)
+            # Push greeting audio frames downstream (toward transport output) immediately
+            for greeting_frame in frames:
+                await self.push_frame(greeting_frame, FrameDirection.DOWNSTREAM)
+            logger.info("✅ Greeting frames injected into audio output path")
+            
+        async def process_frame(self, frame, direction):
+            await super().process_frame(frame, direction)
+            # Always pass through regular frames
+            await self.push_frame(frame, direction)
+    
     # Create frame loggers for debugging
     logger_audio_in = FrameLogger("AUDIO_IN")  # Log audio before STT
     logger_stt = FrameLogger("STT_OUT")
@@ -487,6 +517,9 @@ async def run_bot(websocket: WebSocket):
     logger_llm_out = FrameLogger("LLM_OUT")
     logger_tts_in = FrameLogger("TTS_IN")
     logger_tts_out = FrameLogger("TTS_OUT")
+    
+    # Create greeting frame injector (placed right before transport output)
+    greeting_injector = GreetingFrameInjector()
     
     # Build the pipeline – STT → context → LLM (streaming) → sentence aggregation → TTS
     pipeline = Pipeline(
@@ -503,6 +536,7 @@ async def run_bot(websocket: WebSocket):
             logger_tts_in,                     # DEBUG: Log frames before TTS
             tts,                               # Groq TTS processes AggregatedTextFrames → creates TTSAudioRawFrames + TTSTextFrames
             logger_tts_out,                    # DEBUG: Log TTS output
+            greeting_injector,                 # Inject pre-generated greeting frames directly to audio output
             transport.output(),                # Audio output to Twilio
             context_aggregator.assistant(),    # Assistant → context
         ]
@@ -533,20 +567,22 @@ async def run_bot(websocket: WebSocket):
         logger.info("Starting pipeline...")
         pipeline_task = asyncio.create_task(runner.run(task))
         
-        # Queue pre-generated greeting frames immediately to mask cold start latency
-        # This plays the greeting while STT/LLM are initializing in the background
+        # Inject pre-generated greeting frames directly into audio output path
+        # This bypasses STT/LLM/TTS and sends audio directly to transport output
         global INITIAL_GREETING_FRAMES
+        greeting_text = "هلا، معاك سالم من تطبيق مشتري، شلون أقدر أساعدك؟"
         if INITIAL_GREETING_FRAMES:
-            logger.info(f"Queueing {len(INITIAL_GREETING_FRAMES)} pre-generated greeting frames...")
+            logger.info(f"Preparing to inject {len(INITIAL_GREETING_FRAMES)} pre-generated greeting frames...")
             # Small delay to ensure pipeline is ready to receive frames
             await asyncio.sleep(0.1)
-            await task.queue_frames(INITIAL_GREETING_FRAMES)
-            logger.info("✅ Greeting frames queued - user will hear greeting immediately")
+            # Immediately inject greeting frames into the audio output path
+            await greeting_injector.inject_greeting_now(INITIAL_GREETING_FRAMES, greeting_text)
+            logger.info("✅ Greeting frames injected - user should hear greeting immediately")
         else:
             logger.warning("No pre-generated greeting frames available - using TTSSpeakFrame fallback")
-            # Fallback: use TTSSpeakFrame if pre-generation failed
+            # Fallback: use TTSSpeakFrame (will go through TTS normally)
             await asyncio.sleep(0.1)
-            await task.queue_frames([TTSSpeakFrame(text="هلا، معاك سالم من تطبيق مشتري، شلون أقدر أساعدك؟")])
+            await task.queue_frames([TTSSpeakFrame(text=greeting_text)])
 
         # Wait for pipeline to complete (runs until call ends)
         # The transport will continue reading WebSocket messages in the background
