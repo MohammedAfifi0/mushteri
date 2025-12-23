@@ -257,20 +257,20 @@ async def run_bot(websocket: WebSocket):
         ),
     )
     
-    # Super simple Salem behavior for Twilio – low latency, natural flow
+    # سلوك بسيط لسالم – يركّز على نوع الطلب (شراء / بيع / استفسار) مع لهجة كويتية طبيعية
     messages = [
         {
             "role": "system",
             "content": (
-                "انت سالم، موظف استقبال لتطبيق مشتري في الكويت.\n"
-                "- ردودك قصيرة جداً وطبيعية، جملة أو جملتين فقط.\n"
-                "- لا تعيد السلام ولا التعريف بنفسك أكثر من مرة.\n"
-                "- أول رد فقط: 'معاك سالم من تطبيق مشتري، شلون أقدر أساعدك؟'.\n"
-                "- إذا المتصل يبي يبيع مشروع → اسأله بهدوء عن نوع المشروع، بعدين الموقع، بعدين السعر.\n"
-                "- إذا المتصل يبي يشتري مشروع → اسأله عن الميزانية، بعدين نوع المشروع اللي يدوره.\n"
-                "- إذا كان بس يسأل أو يستفسر عن التطبيق → جاوب باختصار وارجع تسأله إذا يبي يشتري أو يبيع مشروع.\n"
-                "- استخدم لهجة كويتية بسيطة بدون كلمات إنجليزية وبدون تشكيل.\n"
-                "- لا تستخدم كلمات غريبة أو جمل طويلة، خلّ الأسلوب واضح وسلس زي المكالمة العادية.\n"
+                "انت سالم، موظف استقبال في خدمة عملاء تطبيق مُشْتَري في الكويت.\n"
+                "- تكلم بلهجة كويتية بسيطة وواضحة بدون كلمات إنجليزية وبدون تشكيل.\n"
+                "- ردودك قصيرة وواضحة، جملة أو جملتين فقط في كل مرة.\n"
+                "- أول رد فقط: 'معاك سالم من تطبيق مُشْتَري، شلون أقدر أساعدك؟'. لا تعيد نفس الجملة أكثر من مرة.\n"
+                "- إذا المتصل قال إنه يبي يبيع مشروع → اسأله: 'شنو نوع المشروع اللي تبي تبيعه؟' بعدين اسأله عن الموقع، بعدين عن السعر التقريبي والربحية.\n"
+                "- إذا المتصل قال إنه يبي يشتري مشروع → اسأله: 'أي نوع من المشاريع تبي تشتريه؟ مثلاً مطعم، كوفي، صالون، ولا شي ثاني؟' وبعدين اسأله عن ميزانيته المتوقعة.\n"
+                "- إذا المتصل بس يستفسر عن التطبيق أو يسأل بشكل عام → جاوبه باختصار وبعدين اسأله: 'حاب تشتري مشروع ولا تبيع مشروع؟'.\n"
+                "- لا تستخدم كلمات غريبة مثل 'تمشّي' أو 'تمشيوه'. استعمل كلمات مثل: تشتري، تبيع، تدير، تبي تعرض مشروعك.\n"
+                "- لا تطوّل في الكلام؛ خلك لبق، واضح، وسريع في الرد.\n"
             ),
         },
     ]
@@ -279,6 +279,11 @@ async def run_bot(websocket: WebSocket):
     # LLMContextAggregatorPair gives us .user() and .assistant() for the pipeline.
     context = LLMContext(messages)
     context_aggregator = LLMContextAggregatorPair(context)
+
+    # LLM text processor – يجمع التوكِنات المتقطعة ويطلع جُمَل كاملة للـ TTS
+    llm_text_processor = LLMTextProcessor(
+        text_aggregator=SimpleTextAggregator()
+    )
     
     # Function to save lead data (will be connected to DB later)
     def save_lead_data(call_sid: str, data: Dict[str, Any]):
@@ -326,8 +331,7 @@ async def run_bot(websocket: WebSocket):
     logger_tts_in = FrameLogger("TTS_IN")
     logger_tts_out = FrameLogger("TTS_OUT")
     
-    # Build the pipeline - STANDARD Pipecat streaming (no bridge needed)
-    # Groq GPT-OSS streams LLMTextFrames which Groq TTS can consume directly
+    # Build the pipeline – STT → context → LLM (streaming) → sentence aggregation → TTS
     pipeline = Pipeline(
         [
             transport.input(),                 # Audio input from Twilio
@@ -335,8 +339,9 @@ async def run_bot(websocket: WebSocket):
             logger_stt,                        # DEBUG: Log STT output
             context_aggregator.user(),         # User → context
             logger_llm_in,                     # DEBUG: Log frames before LLM
-            llm,                               # Groq openai/gpt-oss-120b processes context → streams LLMTextFrames
-            logger_llm_out,                    # DEBUG: Log LLM output
+            llm,                               # Groq openai/gpt-oss-120b (streams tokens)
+            llm_text_processor,                # Aggregate tokens into full sentences
+            logger_llm_out,                    # DEBUG: Log LLM output after aggregation
             logger_tts_in,                     # DEBUG: Log frames before TTS
             tts,                               # Groq TTS processes LLMTextFrames → creates TTSAudioRawFrames
             logger_tts_out,                    # DEBUG: Log TTS output
