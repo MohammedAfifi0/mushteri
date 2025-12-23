@@ -164,67 +164,97 @@ def get_reserved_service(service_name: str):
     return service
 
 
-def pre_generate_greeting_audio() -> tuple[bytes | None, int]:
+def pre_generate_greeting_frames() -> list[TTSAudioRawFrame] | None:
     """
-    Pre-generate initial greeting using Groq PlayTTS Arabic (Nasser voice).
+    Pre-generate initial greeting audio and convert to TTSAudioRawFrame chunks.
     This is called at startup to eliminate TTS latency on first response.
+    Audio is resampled to 8kHz and chunked for immediate queuing.
     
     Returns:
-        Tuple of (audio_bytes, sample_rate) or (None, 48000) if generation fails
+        List of TTSAudioRawFrame chunks ready to queue, or None if generation fails
     """
     if not GROQ_API_KEY:
         logger.warning("GROQ_API_KEY not found, cannot pre-generate greeting audio")
-        return None, 48000
+        return None
     
     try:
-        logger.info("Pre-generating initial greeting audio with Groq Orpheus Arabic Saudi (sultan voice)...")
+        logger.info("Pre-generating initial greeting audio frames...")
         client = Groq(api_key=GROQ_API_KEY)
         
-        # Exact greeting text as specified
-        greeting_text = "السلام عليكم، معاك سالم من تطبيق مُشْتَري، شلون أقدر أخدمك اليوم؟"
+        # Greeting text matching the system prompt
+        greeting_text = "هلا، معاك سالم من تطبيق مشتري، شلون أقدر أساعدك؟"
         
-        # Generate audio using Groq Orpheus Arabic Saudi model (migrated from deprecated playai-tts-arabic)
-        # Available voices: sultan, fahad, lulwa, noura
+        # Use same TTS model/voice as the service (playai-tts-arabic with Nasser-PlayAI)
+        # Note: Using Groq audio.speech API directly (same as TTS service uses internally)
         response = client.audio.speech.create(
-            model="canopylabs/orpheus-arabic-saudi",  # New model replacing deprecated playai-tts-arabic
-            voice="sultan",  # Saudi male voice
+            model="playai-tts-arabic",
+            voice="Nasser-PlayAI",
             response_format="wav",
             input=greeting_text,
         )
         
-        # Read the response content properly
-        # Try different methods to read the binary response
+        # Read the response content
         try:
-            # Method 1: Try content attribute (most common)
             audio_bytes = response.content
         except AttributeError:
             try:
-                # Method 2: Try read() if it's a file-like object
                 audio_bytes = response.read()
             except AttributeError:
                 try:
-                    # Method 3: Try iter_bytes() if it's a streaming response
                     audio_bytes = b""
                     for chunk in response.iter_bytes():
                         audio_bytes += chunk
                 except AttributeError:
-                    logger.error("Could not read audio response - unknown response type")
-                    return None, 48000
+                    logger.error("Could not read audio response")
+                    return None
         
-        # Parse WAV header to get sample rate
+        # Parse WAV and convert to 8kHz PCM for Twilio
         with wave.open(io.BytesIO(audio_bytes), 'rb') as wav_file:
-            sample_rate = wav_file.getframerate()
+            source_rate = wav_file.getframerate()
+            n_channels = wav_file.getnchannels()
+            pcm_data = wav_file.readframes(wav_file.getnframes())
         
-        logger.info(f"Reserved agent audio pre-generated successfully ({len(audio_bytes)} bytes, {sample_rate}Hz)")
-        return audio_bytes, sample_rate
+        # Convert to numpy array
+        audio_array = np.frombuffer(pcm_data, dtype=np.int16)
+        
+        # Stereo to mono if needed
+        if n_channels == 2:
+            audio_array = audio_array.reshape(-1, 2).mean(axis=1).astype(np.int16)
+        
+        # Resample to 8kHz for Twilio (if not already 8kHz)
+        target_rate = 8000
+        if source_rate != target_rate:
+            num_samples = int(len(audio_array) * target_rate / source_rate)
+            audio_array = signal.resample(audio_array, num_samples).astype(np.int16)
+        
+        # Convert back to bytes
+        final_bytes = audio_array.tobytes()
+        
+        # Chunk into 20ms frames (320 bytes @ 8kHz = 20ms)
+        chunk_size = 320
+        frames = []
+        for i in range(0, len(final_bytes), chunk_size):
+            chunk = final_bytes[i:i + chunk_size]
+            if len(chunk) > 0:
+                # Pad last chunk if needed to maintain consistent chunk size
+                if len(chunk) < chunk_size:
+                    chunk = chunk + b'\x00' * (chunk_size - len(chunk))
+                frames.append(TTSAudioRawFrame(
+                    audio=chunk,
+                    sample_rate=target_rate,
+                    num_channels=1
+                ))
+        
+        logger.info(f"✅ Pre-generated {len(frames)} greeting frames ({len(final_bytes)} bytes, {target_rate}Hz)")
+        return frames
         
     except Exception as e:
-        logger.error(f"Failed to pre-generate greeting audio: {e}")
-        return None, 48000
+        logger.error(f"Failed to pre-generate greeting audio: {e}", exc_info=True)
+        return None
 
 
-# Initial pre-generated greeting is disabled now to keep behavior simple.
-INITIAL_GREETING_AUDIO, INITIAL_GREETING_SAMPLE_RATE = None, 0
+# Global storage for pre-generated greeting frames
+INITIAL_GREETING_FRAMES: list[TTSAudioRawFrame] | None = None
 
 
 async def run_bot(websocket: WebSocket):
@@ -503,8 +533,20 @@ async def run_bot(websocket: WebSocket):
         logger.info("Starting pipeline...")
         pipeline_task = asyncio.create_task(runner.run(task))
         
-        # Immediately hand control to the normal pipeline (no pre-recorded greeting).
-        # Salem will speak only when the LLM/TTS respond.
+        # Queue pre-generated greeting frames immediately to mask cold start latency
+        # This plays the greeting while STT/LLM are initializing in the background
+        global INITIAL_GREETING_FRAMES
+        if INITIAL_GREETING_FRAMES:
+            logger.info(f"Queueing {len(INITIAL_GREETING_FRAMES)} pre-generated greeting frames...")
+            # Small delay to ensure pipeline is ready to receive frames
+            await asyncio.sleep(0.1)
+            await task.queue_frames(INITIAL_GREETING_FRAMES)
+            logger.info("✅ Greeting frames queued - user will hear greeting immediately")
+        else:
+            logger.warning("No pre-generated greeting frames available - using TTSSpeakFrame fallback")
+            # Fallback: use TTSSpeakFrame if pre-generation failed
+            await asyncio.sleep(0.1)
+            await task.queue_frames([TTSSpeakFrame(text="هلا، معاك سالم من تطبيق مشتري، شلون أقدر أساعدك؟")])
 
         # Wait for pipeline to complete (runs until call ends)
         # The transport will continue reading WebSocket messages in the background
@@ -534,8 +576,15 @@ app = FastAPI(title="Mushtari Voice Agent", version="1.0.0")
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize reserved agent services on startup for low-latency cold starts"""
+    """Initialize reserved agent services and pre-generate greeting on startup for low-latency cold starts"""
+    global INITIAL_GREETING_FRAMES
+    
+    # Initialize services in parallel with greeting generation
     initialize_reserved_services()
+    
+    # Pre-generate greeting frames in background (non-blocking)
+    # This masks cold start latency by playing greeting immediately on call start
+    INITIAL_GREETING_FRAMES = pre_generate_greeting_frames()
 
 
 @app.get("/")
