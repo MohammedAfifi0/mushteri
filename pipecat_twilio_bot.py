@@ -33,6 +33,7 @@ from pipecat.frames.frames import (
     AggregatedTextFrame,
     TTSTextFrame,
     InputAudioRawFrame,
+    StartFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -488,29 +489,33 @@ async def run_bot(websocket: WebSocket):
             self.greeting_frames = greeting_frames
             self.greeting_text = greeting_text
             self.greeting_sent = False
+            self.pipeline_started = False
             
         async def process_frame(self, frame, direction):
-            await super().process_frame(frame, direction)
+            # Wait for StartFrame to ensure pipeline is fully initialized before injecting
+            if isinstance(frame, StartFrame) and not self.pipeline_started:
+                self.pipeline_started = True
+                logger.debug("Pipeline started - greeting injector ready")
+                
+                # Inject greeting immediately after StartFrame to ensure pipeline is ready
+                # Only inject once, and only when we have pre-generated frames
+                if not self.greeting_sent and self.greeting_frames:
+                    self.greeting_sent = True
+                    logger.info(f"Injecting {len(self.greeting_frames)} pre-generated greeting frames into audio output...")
+                    
+                    # First, inject TTSTextFrame so context aggregator knows greeting was spoken
+                    # This prevents LLM from repeating the greeting
+                    if self.greeting_text:
+                        await self.push_frame(TTSTextFrame(text=self.greeting_text), FrameDirection.DOWNSTREAM)
+                    
+                    # Then inject audio frames downstream toward transport.output()
+                    # These will go: greeting_injector -> transport.output() -> context_aggregator.assistant()
+                    for greeting_frame in self.greeting_frames:
+                        await self.push_frame(greeting_frame, FrameDirection.DOWNSTREAM)
+                    
+                    logger.info("✅ Greeting frames and text injected into pipeline")
             
-            # Inject greeting on first frame going downstream (when pipeline starts)
-            # This ensures greeting is injected as part of normal pipeline flow
-            if not self.greeting_sent and direction == FrameDirection.DOWNSTREAM and self.greeting_frames:
-                self.greeting_sent = True
-                logger.info(f"Injecting {len(self.greeting_frames)} pre-generated greeting frames into audio output...")
-                
-                # Inject audio frames downstream toward transport.output()
-                # These will go: greeting_injector -> transport.output() -> context_aggregator.assistant()
-                for greeting_frame in self.greeting_frames:
-                    await self.push_frame(greeting_frame, FrameDirection.DOWNSTREAM)
-                
-                # Send TTSTextFrame downstream so context aggregator knows greeting was spoken
-                # This prevents LLM from repeating the greeting
-                if self.greeting_text:
-                    await self.push_frame(TTSTextFrame(text=self.greeting_text), FrameDirection.DOWNSTREAM)
-                
-                logger.info("✅ Greeting frames and text injected into pipeline")
-            
-            # Always pass through regular frames
+            # Always pass through regular frames (including StartFrame)
             await self.push_frame(frame, direction)
     
     # Create frame loggers for debugging
@@ -577,12 +582,16 @@ async def run_bot(websocket: WebSocket):
         logger.info("Starting pipeline...")
         pipeline_task = asyncio.create_task(runner.run(task))
         
+        # Wait for pipeline to initialize (StartFrame to propagate)
+        await asyncio.sleep(0.2)
+        
         # Greeting will be automatically injected by GreetingFrameInjector when first frame passes through
         # If no pre-generated greeting is available, fallback to TTSSpeakFrame
         if not INITIAL_GREETING_FRAMES:
             logger.warning("No pre-generated greeting frames available - using TTSSpeakFrame fallback")
-            await asyncio.sleep(0.1)  # Small delay to ensure pipeline is ready
             await task.queue_frames([TTSSpeakFrame(text=greeting_text)])
+        else:
+            logger.info(f"Pre-generated greeting frames ready - will be injected automatically on first pipeline frame")
 
         # Wait for pipeline to complete (runs until call ends)
         # The transport will continue reading WebSocket messages in the background
