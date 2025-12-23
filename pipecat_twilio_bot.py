@@ -30,6 +30,7 @@ from pipecat.frames.frames import (
     TranscriptionFrame,
     InterimTranscriptionFrame,
     LLMTextFrame,
+    AggregatedTextFrame,
     TTSTextFrame,
     InputAudioRawFrame,
 )
@@ -256,13 +257,12 @@ async def run_bot(websocket: WebSocket):
     )
     
     # Configure VAD - optimized for low-latency turn-taking on PSTN
-    # stop_secs controls when we decide "user stopped speaking"
-    # Increased stop_secs to 0.6s to avoid cutting off speech prematurely
+    # Balance between quick response and not cutting off speech
     vad_analyzer = SileroVADAnalyzer(
         params=VADParams(
             confidence=0.4,    # Lower threshold for better detection in noisy PSTN
-            start_secs=0.25,   # quick to start
-            stop_secs=0.6,     # Longer pause detection to avoid cutting off words
+            start_secs=0.2,    # Faster start detection for lower latency
+            stop_secs=0.5,     # Balanced pause detection (not too short, not too long)
             min_volume=0.2,    # Lower minimum volume for better sensitivity
         )
     )
@@ -327,6 +327,8 @@ async def run_bot(websocket: WebSocket):
     # Initialize Groq TTS for Arabic using PlayAI Arabic / Nasser
     # NOTE: This model is scheduled for deprecation by Groq, but still works as of now.
     # It often sounds more natural for Gulf Arabic than Orpheus for some content.
+    # Since we use LLMTextProcessor upstream, TTS will receive AggregatedTextFrames
+    # and should NOT use its own text aggregator (to avoid double aggregation issues)
     reserved_tts = get_reserved_service('tts')
     if reserved_tts:
         tts = reserved_tts
@@ -339,24 +341,42 @@ async def run_bot(websocket: WebSocket):
             voice_id="Nasser-PlayAI",
             params=GroqTTSService.InputParams(
                 language="ar",
-                speed=1.15,  # slightly faster than default for snappier feel
+                speed=1.2,  # Slightly faster for lower perceived latency
             ),
         )
     
-    # سلوك بسيط لسالم – يركّز على نوع الطلب (شراء / بيع / استفسار) مع لهجة كويتية طبيعية
+    # نظام محادثة طبيعي ومتوازن – ردود متوسطة الطول، طبيعية، ومريحة
     messages = [
         {
             "role": "system",
             "content": (
-                "انت سالم، موظف استقبال في خدمة عملاء تطبيق مُشْتَري في الكويت.\n"
-                "- تكلم بلهجة كويتية بسيطة وواضحة بدون كلمات إنجليزية وبدون تشكيل.\n"
-                "- ردودك قصيرة وواضحة، جملة أو جملتين فقط في كل مرة.\n"
-                "- أول رد فقط: 'معاك سالم من تطبيق مُشْتَري، شلون أقدر أساعدك؟'. لا تعيد نفس الجملة أكثر من مرة.\n"
-                "- إذا المتصل قال إنه يبي يبيع مشروع → اسأله: 'شنو نوع المشروع اللي تبي تبيعه؟' بعدين اسأله عن الموقع، بعدين عن السعر التقريبي والربحية.\n"
-                "- إذا المتصل قال إنه يبي يشتري مشروع → اسأله: 'أي نوع من المشاريع تبي تشتريه؟ مثلاً مطعم، كوفي، صالون، ولا شي ثاني؟' وبعدين اسأله عن ميزانيته المتوقعة.\n"
-                "- إذا المتصل بس يستفسر عن التطبيق أو يسأل بشكل عام → جاوبه باختصار وبعدين اسأله: 'حاب تشتري مشروع ولا تبيع مشروع؟'.\n"
-                "- لا تستخدم كلمات غريبة مثل 'تمشّي' أو 'تمشيوه'. استعمل كلمات مثل: تشتري، تبيع، تدير، تبي تعرض مشروعك.\n"
-                "- لا تطوّل في الكلام؛ خلك لبق، واضح، وسريع في الرد.\n"
+                "انت سالم، موظف استقبال ودود ومحترف في تطبيق مُشْتَري في الكويت.\n\n"
+                "**الأسلوب واللهجة:**\n"
+                "- تكلم بلهجة كويتية طبيعية وبسيطة، بدون كلمات إنجليزية وبدون تشكيل.\n"
+                "- ردودك متوسطة الطول: ليست قصيرة جداً (مثل 'نعم' فقط) وليست طويلة جداً (أكثر من 3-4 جمل).\n"
+                "- خلك طبيعي ومريح، مثل محادثة عادية مع صديق أو زميل.\n"
+                "- استخدم تعابير كويتية طبيعية مثل 'هلا'، 'شلونك'، 'يعطيك العافية'.\n\n"
+                "**التدفق الطبيعي للمحادثة:**\n"
+                "- أول رد: 'هلا، معاك سالم من تطبيق مشتري، شلون أقدر أساعدك؟'\n"
+                "- استمع جيداً لما يقوله المتصل قبل الرد.\n"
+                "- إذا قال إنه يبي يبيع مشروع:\n"
+                "  * ابدأ بجملة تأكيد ودودة مثل 'ممتاز' أو 'زين'.\n"
+                "  * اسأله عن نوع المشروع (مطعم، كوفي، صالون، إلخ).\n"
+                "  * بعد ما يجيب، اسأله عن الموقع.\n"
+                "  * بعدين اسأله عن السعر التقريبي والربحية الشهرية.\n"
+                "- إذا قال إنه يبي يشتري مشروع:\n"
+                "  * ابدأ بجملة تأكيد ودودة.\n"
+                "  * اسأله: 'أي نوع من المشاريع تبي تشتريه؟ مثلاً مطعم، كوفي، صالون، ولا شي ثاني؟'\n"
+                "  * بعد ما يجيب، اسأله عن ميزانيته المتوقعة.\n"
+                "- إذا بس يستفسر عن التطبيق:\n"
+                "  * جاوبه باختصار ووضوح (2-3 جمل كافية).\n"
+                "  * بعدين اسأله: 'حاب تشتري مشروع ولا تبيع مشروع؟'\n\n"
+                "**مبادئ مهمة:**\n"
+                "- لا تستخدم كلمات غريبة أو غير مألوفة.\n"
+                "- استعمل كلمات بسيطة وواضحة: تشتري، تبيع، تدير، تبي تعرض مشروعك.\n"
+                "- لا تطوّل في الرد، لكن أيضاً لا تقصر جداً. اهدف لرد طبيعي ومريح.\n"
+                "- خلك صبور ومتفهم. إذا المتصل محتاج توضيح، وضّح له بوضوح.\n"
+                "- إذا المتصل قال شكراً أو مع السلامة، اختم بلطف: 'يعطيك العافية، تشرفنا فيك'.\n"
             ),
         },
     ]
@@ -367,6 +387,8 @@ async def run_bot(websocket: WebSocket):
     context_aggregator = LLMContextAggregatorPair(context)
 
     # LLM text processor – يجمع التوكِنات المتقطعة ويطلع جُمَل كاملة للـ TTS
+    # SimpleTextAggregator يجمّع النص حتى نهاية الجملة (؟، .، !) قبل إرساله للـ TTS
+    # هذا يحسّن النطق ويقلّل التقطيع
     llm_text_processor = LLMTextProcessor(
         text_aggregator=SimpleTextAggregator()
     )
@@ -407,11 +429,13 @@ async def run_bot(websocket: WebSocket):
                 if self._audio_frame_count % 50 == 0:
                     logger.debug(f"[{self.logger_name}] InputAudioRawFrame: {len(frame.audio)} bytes (frame {self._audio_frame_count})")
             elif isinstance(frame, LLMTextFrame):
-                logger.info(f"[{self.logger_name}] LLMTextFrame: '{frame.text}'")
+                logger.debug(f"[{self.logger_name}] LLMTextFrame: '{frame.text}'")
+            elif isinstance(frame, AggregatedTextFrame):
+                logger.info(f"[{self.logger_name}] AggregatedTextFrame: '{frame.text}' (type: {frame.type})")
             elif isinstance(frame, TTSTextFrame):
                 logger.info(f"[{self.logger_name}] TTSTextFrame: '{frame.text}'")
             elif isinstance(frame, TTSAudioRawFrame):
-                logger.info(f"[{self.logger_name}] TTSAudioRawFrame: {len(frame.audio)} bytes")
+                logger.debug(f"[{self.logger_name}] TTSAudioRawFrame: {len(frame.audio)} bytes")
             elif hasattr(frame, '__class__'):
                 frame_type = frame.__class__.__name__
                 # Log all frame types for STT debugging
@@ -437,11 +461,11 @@ async def run_bot(websocket: WebSocket):
             logger_stt,                        # DEBUG: Log STT output
             context_aggregator.user(),         # User → context
             logger_llm_in,                     # DEBUG: Log frames before LLM
-            llm,                               # Groq openai/gpt-oss-120b (streams tokens)
-            llm_text_processor,                # Aggregate tokens into full sentences
-            logger_llm_out,                    # DEBUG: Log LLM output after aggregation
+            llm,                               # Groq openai/gpt-oss-120b (streams LLMTextFrames)
+            llm_text_processor,                # Aggregate LLMTextFrames into AggregatedTextFrames (sentences)
+            logger_llm_out,                    # DEBUG: Log aggregated text frames
             logger_tts_in,                     # DEBUG: Log frames before TTS
-            tts,                               # Groq TTS processes LLMTextFrames → creates TTSAudioRawFrames
+            tts,                               # Groq TTS processes AggregatedTextFrames → creates TTSAudioRawFrames + TTSTextFrames
             logger_tts_out,                    # DEBUG: Log TTS output
             transport.output(),                # Audio output to Twilio
             context_aggregator.assistant(),    # Assistant → context
