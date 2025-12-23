@@ -139,10 +139,10 @@ def initialize_reserved_services():
                 api_key=GROQ_API_KEY,
                 model_name="playai-tts-arabic",
                 voice_id="Nasser-PlayAI",
-                params=GroqTTSService.InputParams(
-                    language="ar",
-                    speed=1.15,
-                ),
+                    params=GroqTTSService.InputParams(
+                        language="ar",
+                        speed=1.3,  # Faster speech for lower latency
+                    ),
             )
             logger.info("✅ Groq TTS pre-initialized")
         
@@ -311,7 +311,7 @@ async def run_bot(websocket: WebSocket):
         params=VADParams(
             confidence=0.4,    # Lower threshold for better detection in noisy PSTN
             start_secs=0.2,    # Faster start detection for lower latency
-            stop_secs=0.5,     # Balanced pause detection (not too short, not too long)
+            stop_secs=0.4,     # Faster pause detection for lower latency
             min_volume=0.2,    # Lower minimum volume for better sensitivity
         )
     )
@@ -390,7 +390,7 @@ async def run_bot(websocket: WebSocket):
             voice_id="Nasser-PlayAI",
             params=GroqTTSService.InputParams(
                 language="ar",
-                speed=1.2,  # Slightly faster for lower perceived latency
+                speed=1.3,  # Faster speech for lower perceived latency
             ),
         )
     
@@ -415,20 +415,23 @@ async def run_bot(websocket: WebSocket):
                 "  * اسأله عن نوع المشروع (مطعم، كوفي، صالون، إلخ) وسجّل المعلومات.\n"
                 "  * بعد ما يجيب، اسأله عن الموقع وسجّله.\n"
                 "  * بعدين اسأله عن السعر التقريبي والربحية الشهرية وسجّلها.\n"
+                "  * بعد ما يعطيك كل المعلومات (النوع، الموقع، السعر، الربحية)، أكد له إنك سجلت المعلومات وأخبره إنه راح يتواصل معه فريقنا قريب.\n"
                 "- إذا قال إنه يبي يشتري مشروع:\n"
                 "  * ابدأ بجملة تأكيد ودودة.\n"
                 "  * اسأله: 'أي نوع من المشاريع تبي تشتريه؟ مثلاً مطعم، كوفي، صالون، ولا شي ثاني؟' وسجّل نوع المشروع.\n"
                 "  * بعد ما يجيب، اسأله عن ميزانيته المتوقعة وسجّلها.\n"
+                "  * بعد ما يعطيك المعلومات (النوع، الميزانية)، أكد له إنك سجلت المعلومات وأخبره إنه راح يتواصل معه فريقنا قريب.\n"
                 "- إذا بس يستفسر عن التطبيق:\n"
                 "  * جاوبه باختصار ووضوح (2-3 جمل كافية).\n"
                 "  * بعدين اسأله: 'حاب تشتري مشروع ولا تبيع مشروع؟'\n\n"
                 "**مبادئ مهمة:**\n"
                 "- لا تستخدم كلمات غريبة أو غير مألوفة.\n"
                 "- استعمل كلمات بسيطة وواضحة: تشتري، تبيع، تدير، تبي تعرض مشروعك.\n"
-                "- لا تطوّل في الرد، لكن أيضاً لا تقصر جداً. اهدف لرد طبيعي ومريح.\n"
+                "- لا تطوّل في الرد، لكن أيضاً لا تقصر جداً. اهدف لرد طبيعي ومريح (2-3 جمل).\n"
                 "- خلك صبور ومتفهم. إذا المتصل محتاج توضيح، وضّح له بوضوح.\n"
-                "- لا تكرر نفس الجملة مرتين متتاليتين (مثل 'يعطيك العافية' أكثر من مرة).\n"
-                "- إذا المتصل قال شكراً أو مع السلامة، اختم بلطف: 'يعطيك العافية، تشرفنا فيك'.\n"
+                "- لا تقول 'يعطيك العافية' إلا في نهاية المحادثة عندما المتصل يقول شكراً أو مع السلامة.\n"
+                "- لا تنهي المحادثة قبل ما تجمع كل المعلومات المطلوبة. استمر في جمع المعلومات حتى تكتمل.\n"
+                "- إذا المتصل قال شكراً أو مع السلامة، فقط عندها اختم بلطف: 'يعطيك العافية، تشرفنا فيك'.\n"
             ),
         },
     ]
@@ -445,9 +448,9 @@ async def run_bot(websocket: WebSocket):
         text_aggregator=SimpleTextAggregator()
     )
     
-    # Custom frame logger to debug what's happening in the pipeline
+    # Custom frame logger - minimal logging for essential info only
     class FrameLogger(FrameProcessor):
-        """Log all frames flowing through pipeline for debugging"""
+        """Log essential frames: STT transcription, LLM output, TTS output"""
         def __init__(self, logger_name: str):
             super().__init__()
             self.logger_name = logger_name
@@ -455,63 +458,40 @@ async def run_bot(websocket: WebSocket):
         async def process_frame(self, frame, direction):
             await super().process_frame(frame, direction)
             
-            # Log important frames for debugging (errors in logging shouldn't break pipeline)
+            # Only log essential information
             try:
                 if isinstance(frame, TranscriptionFrame):
-                    logger.info(f"[{self.logger_name}] TranscriptionFrame: {frame.text}")
-                elif isinstance(frame, InterimTranscriptionFrame):
-                    logger.debug(f"[{self.logger_name}] InterimTranscriptionFrame: {frame.text}")
-                elif isinstance(frame, InputAudioRawFrame):
-                    # Only log occasionally to avoid spam (every 50 frames = ~1 second at 8kHz)
-                    if not hasattr(self, '_audio_frame_count'):
-                        self._audio_frame_count = 0
-                    self._audio_frame_count += 1
-                    if self._audio_frame_count % 50 == 0:
-                        logger.debug(f"[{self.logger_name}] InputAudioRawFrame: {len(frame.audio)} bytes (frame {self._audio_frame_count})")
-                elif isinstance(frame, LLMTextFrame):
-                    logger.debug(f"[{self.logger_name}] LLMTextFrame: '{frame.text}'")
+                    logger.info(f"🎤 Azure STT: {frame.text}")
                 elif isinstance(frame, AggregatedTextFrame):
-                    # Safely access text attribute
+                    # LLM output (aggregated text)
                     text = getattr(frame, 'text', '')
-                    logger.info(f"[{self.logger_name}] AggregatedTextFrame: '{text}'")
+                    if text:
+                        logger.info(f"🤖 LLM: {text}")
                 elif isinstance(frame, TTSTextFrame):
-                    logger.info(f"[{self.logger_name}] TTSTextFrame: {frame.text}")
-                elif isinstance(frame, TTSAudioRawFrame):
-                    logger.debug(f"[{self.logger_name}] TTSAudioRawFrame: {len(frame.audio)} bytes")
-                elif hasattr(frame, '__class__'):
-                    frame_type = frame.__class__.__name__
-                    # Log all frame types for STT debugging
-                    if 'Transcription' in frame_type or 'Interim' in frame_type or 'User' in frame_type:
-                        logger.debug(f"[{self.logger_name}] {frame_type}")
+                    logger.info(f"🔊 TTS: {frame.text}")
             except Exception as e:
-                # Log error but don't break the pipeline
-                logger.warning(f"[{self.logger_name}] Error logging frame: {e}")
+                # Silent fail - don't break pipeline
+                pass
             
             await self.push_frame(frame, direction)
     
-    # Create frame loggers for debugging
-    logger_audio_in = FrameLogger("AUDIO_IN")  # Log audio before STT
-    logger_stt = FrameLogger("STT_OUT")
-    logger_llm_in = FrameLogger("LLM_IN")
-    logger_llm_out = FrameLogger("LLM_OUT")
-    logger_tts_in = FrameLogger("TTS_IN")
-    logger_tts_out = FrameLogger("TTS_OUT")
+    # Create frame loggers - minimal logging at key points
+    logger_stt = FrameLogger("STT")      # Log STT transcriptions
+    logger_llm_out = FrameLogger("LLM")  # Log LLM aggregated output
+    logger_tts_out = FrameLogger("TTS")  # Log TTS output
     
     # Build the pipeline – STT → context → LLM (streaming) → sentence aggregation → TTS
     pipeline = Pipeline(
         [
             transport.input(),                 # Audio input from Twilio
-            logger_audio_in,                   # DEBUG: Log audio input
             stt,                               # Azure Speech-to-Text (Arabic)
-            logger_stt,                        # DEBUG: Log STT output
+            logger_stt,                        # Log STT transcriptions
             context_aggregator.user(),         # User → context
-            logger_llm_in,                     # DEBUG: Log frames before LLM
             llm,                               # Groq openai/gpt-oss-120b (streams LLMTextFrames)
             llm_text_processor,                # Aggregate LLMTextFrames into AggregatedTextFrames (sentences)
-            logger_llm_out,                    # DEBUG: Log aggregated text frames
-            logger_tts_in,                     # DEBUG: Log frames before TTS
+            logger_llm_out,                    # Log LLM aggregated output
             tts,                               # Groq TTS processes AggregatedTextFrames → creates TTSAudioRawFrames + TTSTextFrames
-            logger_tts_out,                    # DEBUG: Log TTS output
+            logger_tts_out,                    # Log TTS output
             transport.output(),                # Audio output to Twilio
             context_aggregator.assistant(),    # Assistant → context
         ]
@@ -548,7 +528,7 @@ async def run_bot(websocket: WebSocket):
         if INITIAL_GREETING_FRAMES:
             logger.info(f"Queueing {len(INITIAL_GREETING_FRAMES)} pre-generated greeting frames...")
             # Small delay to ensure pipeline is ready to receive frames
-            await asyncio.sleep(0.15)  # Slightly longer delay to ensure pipeline is fully ready
+            await asyncio.sleep(0.1)  # Minimal delay for lower latency
             await task.queue_frames(INITIAL_GREETING_FRAMES)
             
             # IMPORTANT: Add greeting to context so LLM knows it was already spoken
@@ -561,7 +541,7 @@ async def run_bot(websocket: WebSocket):
         else:
             logger.warning("No pre-generated greeting frames available - using TTSSpeakFrame fallback")
             # Fallback: use TTSSpeakFrame if pre-generation failed
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(0.1)
             await task.queue_frames([TTSSpeakFrame(text=INITIAL_GREETING_TEXT)])
             # Add to context for fallback too
             greeting_message = {"role": "assistant", "content": INITIAL_GREETING_TEXT}
