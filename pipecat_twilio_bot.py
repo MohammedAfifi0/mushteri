@@ -111,8 +111,8 @@ def initialize_reserved_services():
     Pre-initialize services at startup to reduce cold-start latency.
     This is a simple reserved agent pattern for self-hosted deployments.
     
-    NOTE: Azure STT is NOT pre-initialized because it maintains recognition session state
-    and must be created per-call to avoid state conflicts. Only Groq LLM/TTS are shared.
+    NOTE: Azure STT and Groq TTS are NOT pre-initialized because they maintain internal state
+    and must be created per-call to avoid state conflicts. Only Groq LLM is shared (truly stateless).
     """
     global _reserved_services
     
@@ -123,6 +123,10 @@ def initialize_reserved_services():
         # and must be created fresh for each call to avoid state conflicts
         # Azure STT initialization is fast enough (~50-100ms) that per-call creation is acceptable
         
+        # DO NOT pre-initialize Groq TTS - even though it's HTTP-based, the Pipecat service wrapper
+        # maintains internal state that can cause issues when reused across calls (silence on subsequent calls)
+        # Creating a new instance per call ensures clean state for each conversation
+        
         # Pre-initialize Groq LLM (HTTP-based, stateless, safe to share)
         if GROQ_API_KEY:
             logger.info("Pre-initializing Groq LLM...")
@@ -131,21 +135,8 @@ def initialize_reserved_services():
                 model="openai/gpt-oss-120b",
             )
             logger.info("✅ Groq LLM pre-initialized")
-            
-            # Pre-initialize Groq TTS (HTTP-based, stateless, safe to share)
-            logger.info("Pre-initializing Groq TTS...")
-            _reserved_services['tts'] = GroqTTSService(
-                api_key=GROQ_API_KEY,
-                model_name="playai-tts-arabic",
-                voice_id="Nasser-PlayAI",
-                    params=GroqTTSService.InputParams(
-                        language="ar",
-                        speed=1.3,  # Faster speech for lower latency
-                    ),
-            )
-            logger.info("✅ Groq TTS pre-initialized")
         
-        logger.info("Reserved agent services initialized successfully (LLM/TTS only)")
+        logger.info("Reserved agent services initialized successfully (LLM only)")
         
     except Exception as e:
         logger.warning(f"Failed to initialize reserved services (will create per-call): {e}")
@@ -374,21 +365,19 @@ async def run_bot(websocket: WebSocket):
     # It often sounds more natural for Gulf Arabic than Orpheus for some content.
     # Since we use LLMTextProcessor upstream, TTS will receive AggregatedTextFrames
     # and should NOT use its own text aggregator (to avoid double aggregation issues)
-    reserved_tts = get_reserved_service('tts')
-    if reserved_tts:
-        tts = reserved_tts
-        logger.info("Using reserved Groq TTS")
-    else:
-        logger.info("Creating new Groq TTS")
-        tts = GroqTTSService(
-            api_key=GROQ_API_KEY,
-            model_name="playai-tts-arabic",
-            voice_id="Nasser-PlayAI",
-            params=GroqTTSService.InputParams(
-                language="ar",
-                speed=1.3,  # Faster speech for lower perceived latency
-            ),
-        )
+    # IMPORTANT: Always create a new TTS instance per call to avoid state contamination
+    # Even though Groq TTS is HTTP-based, the Pipecat service wrapper maintains internal state
+    # that can cause silence on subsequent calls if reused
+    logger.info("Creating new Groq TTS instance for this call")
+    tts = GroqTTSService(
+        api_key=GROQ_API_KEY,
+        model_name="playai-tts-arabic",
+        voice_id="Nasser-PlayAI",
+        params=GroqTTSService.InputParams(
+            language="ar",
+            speed=1.3,  # Faster speech for lower perceived latency
+        ),
+    )
     
     # نظام محادثة طبيعي ومتوازن – ردود متوسطة الطول، طبيعية، ومريحة
     messages = [
@@ -818,7 +807,7 @@ if __name__ == "__main__":
     logger.info(f"  - STT: Azure Speech Services ({os.getenv('AZURE_SPEECH_LANGUAGE', 'ar-SA')})")
     logger.info(f"  - TTS: Groq PlayAI Arabic (playai-tts-arabic, Nasser-PlayAI)")
     logger.info(f"  - VAD: Silero (confidence=0.4, start=0.25s, stop=0.6s)")
-    logger.info(f"  - Reserved Agent: Enabled (services pre-initialized for low latency)")
+    logger.info(f"  - Reserved Agent: Enabled (LLM pre-initialized for low latency)")
     
     # Run FastAPI server
     uvicorn.run(
