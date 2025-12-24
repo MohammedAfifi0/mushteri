@@ -589,21 +589,31 @@ async def run_bot(websocket: WebSocket):
         global INITIAL_GREETING_FRAMES, INITIAL_GREETING_TEXT
         if INITIAL_GREETING_FRAMES:
             logger.info(f"Queueing {len(INITIAL_GREETING_FRAMES)} pre-generated greeting frames...")
-            # Small delay to ensure pipeline is ready to receive frames
-            await asyncio.sleep(0.1)  # Minimal delay for lower latency
-            await task.queue_frames(INITIAL_GREETING_FRAMES)
-            
-            # IMPORTANT: Add greeting to context so LLM knows it was already spoken
-            # This prevents the LLM from repeating the greeting
-            greeting_message = {"role": "assistant", "content": INITIAL_GREETING_TEXT}
-            await task.queue_frames([
-                LLMMessagesAppendFrame([greeting_message], run_llm=False)
-            ])
-            logger.info("✅ Greeting frames queued and added to context - LLM will not repeat greeting")
+            # Wait for pipeline to be fully ready before queuing frames
+            # Increased delay to ensure pipeline is ready to process frames
+            await asyncio.sleep(0.2)  # Wait for pipeline to be ready
+            try:
+                await task.queue_frames(INITIAL_GREETING_FRAMES)
+                
+                # IMPORTANT: Add greeting to context so LLM knows it was already spoken
+                # This prevents the LLM from repeating the greeting
+                greeting_message = {"role": "assistant", "content": INITIAL_GREETING_TEXT}
+                await task.queue_frames([
+                    LLMMessagesAppendFrame([greeting_message], run_llm=False)
+                ])
+                logger.info("✅ Greeting frames queued and added to context - LLM will not repeat greeting")
+            except Exception as e:
+                logger.error(f"Error queueing greeting frames: {e}", exc_info=True)
+                # Fallback to TTSSpeakFrame if queueing fails
+                await task.queue_frames([TTSSpeakFrame(text=INITIAL_GREETING_TEXT)])
+                greeting_message = {"role": "assistant", "content": INITIAL_GREETING_TEXT}
+                await task.queue_frames([
+                    LLMMessagesAppendFrame([greeting_message], run_llm=False)
+                ])
         else:
             logger.warning("No pre-generated greeting frames available - using TTSSpeakFrame fallback")
             # Fallback: use TTSSpeakFrame if pre-generation failed
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.2)
             await task.queue_frames([TTSSpeakFrame(text=INITIAL_GREETING_TEXT)])
             # Add to context for fallback too
             greeting_message = {"role": "assistant", "content": INITIAL_GREETING_TEXT}
@@ -622,7 +632,7 @@ async def run_bot(websocket: WebSocket):
     finally:
         # Ensure task is cancelled if still running
         try:
-            if not task.is_finished():
+            if not task.has_finished():
                 logger.info("Task still running, cancelling...")
                 await task.cancel()
         except Exception as e:
