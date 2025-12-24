@@ -685,6 +685,9 @@ async def handle_incoming_call(request: Request):
     """
     Twilio webhook handler for incoming calls.
     Returns TwiML that connects to WebSocket endpoint.
+    
+    This endpoint is stateless and can handle multiple concurrent calls.
+    Each call gets its own WebSocket connection via the /ws endpoint.
     """
     try:
         logger.info("Twilio webhook received - processing incoming call")
@@ -771,15 +774,27 @@ async def websocket_endpoint(websocket: WebSocket):
     
     Following docs pattern: accept websocket and pass to run_bot.
     run_bot will parse the websocket and set up the pipeline.
-    """
-    await websocket.accept()
-    logger.info("WebSocket connection accepted from Twilio")
     
+    This endpoint handles concurrent connections - each call gets its own WebSocket
+    connection and pipeline instance. Railway will scale horizontally by creating
+    multiple containers when needed.
+    """
     try:
+        await websocket.accept()
+        logger.info("WebSocket connection accepted from Twilio")
+        
         # Pass websocket to run_bot - it will parse and set up everything
+        # Each call runs in its own async context, allowing concurrent calls
         await run_bot(websocket)
     except Exception as e:
         logger.error(f"WebSocket error: {e}", exc_info=True)
+        # Try to send error response if WebSocket is still open
+        try:
+            if hasattr(websocket, 'client_state'):
+                if websocket.client_state.name == 'CONNECTED':
+                    await websocket.close(code=1011, reason="Internal server error")
+        except Exception:
+            pass  # Ignore errors during error handling
     finally:
         logger.info("Closing WebSocket connection")
         try:
@@ -798,8 +813,12 @@ async def websocket_endpoint(websocket: WebSocket):
 
 if __name__ == "__main__":
     # Get port from environment or use default
-    # Default to 8765 to match ngrok forwarding
-    port = int(os.getenv("PORT", 8765))
+    # Default to 8080 for Pipecat Cloud (also works with Railway, ngrok, etc.)
+    port = int(os.getenv("PORT", 8080))
+    
+    # Get concurrency limits from environment (for Railway scaling)
+    # Default to 100 concurrent connections per worker
+    limit_concurrency = int(os.getenv("LIMIT_CONCURRENCY", 100))
     
     logger.info(f"Starting Mushtari Voice Agent on port {port}")
     logger.info("Configuration:")
@@ -808,11 +827,17 @@ if __name__ == "__main__":
     logger.info(f"  - TTS: Groq PlayAI Arabic (playai-tts-arabic, Nasser-PlayAI)")
     logger.info(f"  - VAD: Silero (confidence=0.4, start=0.25s, stop=0.6s)")
     logger.info(f"  - Reserved Agent: Enabled (LLM pre-initialized for low latency)")
+    logger.info(f"  - Concurrency Limit: {limit_concurrency} concurrent connections")
     
-    # Run FastAPI server
+    # Run FastAPI server with proper concurrency settings
+    # Note: WebSockets require single worker mode (workers=1) because WebSocket state is per-process
+    # For horizontal scaling, Railway will create multiple containers instead
     uvicorn.run(
         app,
         host="0.0.0.0",
         port=port,
         log_level="info",
+        limit_concurrency=limit_concurrency,  # Max concurrent connections
+        timeout_keep_alive=30,  # Keep connections alive for 30 seconds
+        backlog=2048,  # Connection backlog queue size
     )
