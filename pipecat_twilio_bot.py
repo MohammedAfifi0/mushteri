@@ -305,13 +305,14 @@ async def run_bot(websocket: WebSocket):
     if call_sid:
         save_lead_data(call_sid, {"call_started": datetime.now().isoformat()})
     
-    # Configure VAD - optimized for low-latency turn-taking on PSTN
-    # Balance between quick response and not cutting off speech
+    # Configure VAD - optimized for natural conversation flow
+    # Increased stop_secs to prevent cutting off speech prematurely
+    # This ensures complete thoughts are captured before processing
     vad_analyzer = SileroVADAnalyzer(
         params=VADParams(
             confidence=0.4,    # Lower threshold for better detection in noisy PSTN
-            start_secs=0.2,    # Faster start detection for lower latency
-            stop_secs=0.4,     # Faster pause detection for lower latency
+            start_secs=0.2,    # Fast start detection for responsiveness
+            stop_secs=1.0,     # Wait longer before confirming speech stopped (prevents cutting off mid-sentence)
             min_volume=0.2,    # Lower minimum volume for better sensitivity
         )
     )
