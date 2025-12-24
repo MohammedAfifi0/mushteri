@@ -702,7 +702,7 @@ async def handle_incoming_call(request: Request):
         
         # Get server host from environment or request headers
         # Priority: Valid SERVER_HOST env var > X-Forwarded-Host header > Host header
-        # Always prefer request headers if SERVER_HOST is not a valid domain
+        # Railway automatically sets X-Forwarded-Host, so request headers are reliable
         server_host_env = os.getenv("SERVER_HOST", "")
         
         # Check if SERVER_HOST is a valid domain (contains dot and is not just a partial name)
@@ -711,7 +711,7 @@ async def handle_incoming_call(request: Request):
         if is_valid_domain:
             host = server_host_env
         else:
-            # Use request headers - these are more reliable for ngrok
+            # Use request headers - Railway sets these automatically
             host = (
                 request.headers.get("x-forwarded-host") 
                 or request.headers.get("host")
@@ -724,22 +724,28 @@ async def handle_incoming_call(request: Request):
                 host = host.replace("http://", "")
             if host.startswith("https://"):
                 host = host.replace("https://", "")
-            # Remove port if present (ngrok URLs don't need ports)
+            # Remove port if present (production URLs don't need ports)
             if ":" in host and not host.startswith("["):  # IPv6 check
                 host = host.split(":")[0]
         
-        # Determine protocol - ALWAYS use wss for ngrok and production
-        # ngrok always uses HTTPS/WSS, so detect ngrok domains
-        is_ngrok = host and ("ngrok" in host.lower() or "ngrok-free.dev" in host.lower() or "ngrok.io" in host.lower())
-        is_production = host and ("railway.app" in host or "vercel.app" in host or "herokuapp.com" in host)
+        # Determine protocol - ALWAYS use wss for production (Railway, Vercel, etc.)
+        # Also supports ngrok for local development
+        is_production = host and (
+            "railway.app" in host or 
+            "vercel.app" in host or 
+            "herokuapp.com" in host or
+            "ngrok" in host.lower() or  # ngrok for local dev
+            "ngrok-free.dev" in host.lower() or
+            "ngrok.io" in host.lower()
+        )
         
-        protocol = "wss" if (is_ngrok or is_production) else "ws"
+        protocol = "wss" if is_production else "ws"
         
         # Final validation - if host looks invalid, log warning
         if not host or len(host) < 3 or "." not in host:
             logger.warning(f"Invalid host detected: '{host}'. Using request headers instead.")
             host = request.headers.get("host") or request.headers.get("x-forwarded-host") or "localhost"
-            protocol = "wss" if "ngrok" in host.lower() else "ws"
+            protocol = "wss" if ("railway.app" in host or "ngrok" in host.lower()) else "ws"
         
         logger.info(f"Incoming call detected - Host: {host}, Protocol: {protocol}")
         logger.info(f"Connecting to {protocol}://{host}/ws")
