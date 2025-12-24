@@ -10,6 +10,7 @@ import asyncio
 import io
 import wave
 import time
+import threading
 import numpy as np
 from scipy import signal
 from datetime import datetime
@@ -75,7 +76,9 @@ from pipecat.runner.utils import parse_telephony_websocket
 load_dotenv()
 
 # In-memory storage for lead data (will be replaced with DB later)
+# Thread-safe storage for concurrent calls
 lead_storage: Dict[str, Dict[str, Any]] = {}
+lead_storage_lock = threading.Lock()
 
 # Environment variables
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -107,25 +110,20 @@ def initialize_reserved_services():
     """
     Pre-initialize services at startup to reduce cold-start latency.
     This is a simple reserved agent pattern for self-hosted deployments.
+    
+    NOTE: Azure STT is NOT pre-initialized because it maintains recognition session state
+    and must be created per-call to avoid state conflicts. Only Groq LLM/TTS are shared.
     """
     global _reserved_services
     
     try:
         logger.info("Initializing reserved agent services...")
         
-        # Pre-initialize Azure STT (most time-consuming)
-        if AZURE_SPEECH_KEY and AZURE_SPEECH_REGION:
-            azure_language = os.getenv("AZURE_SPEECH_LANGUAGE", "ar-SA")
-            logger.info(f"Pre-initializing Azure STT (language={azure_language})...")
-            _reserved_services['stt'] = AzureSTTService(
-                api_key=AZURE_SPEECH_KEY,
-                region=AZURE_SPEECH_REGION,
-                language=azure_language,
-                audio_passthrough=True,
-            )
-            logger.info("✅ Azure STT pre-initialized")
+        # DO NOT pre-initialize Azure STT - it maintains recognition session state
+        # and must be created fresh for each call to avoid state conflicts
+        # Azure STT initialization is fast enough (~50-100ms) that per-call creation is acceptable
         
-        # Pre-initialize Groq LLM
+        # Pre-initialize Groq LLM (HTTP-based, stateless, safe to share)
         if GROQ_API_KEY:
             logger.info("Pre-initializing Groq LLM...")
             _reserved_services['llm'] = GroqLLMService(
@@ -134,7 +132,7 @@ def initialize_reserved_services():
             )
             logger.info("✅ Groq LLM pre-initialized")
             
-            # Pre-initialize Groq TTS
+            # Pre-initialize Groq TTS (HTTP-based, stateless, safe to share)
             logger.info("Pre-initializing Groq TTS...")
             _reserved_services['tts'] = GroqTTSService(
                 api_key=GROQ_API_KEY,
@@ -147,7 +145,7 @@ def initialize_reserved_services():
             )
             logger.info("✅ Groq TTS pre-initialized")
         
-        logger.info("Reserved agent services initialized successfully")
+        logger.info("Reserved agent services initialized successfully (LLM/TTS only)")
         
     except Exception as e:
         logger.warning(f"Failed to initialize reserved services (will create per-call): {e}")
@@ -292,14 +290,15 @@ async def run_bot(websocket: WebSocket):
     # Function to save lead data (will be connected to DB later)
     def save_lead_data(call_sid: str, data: Dict[str, Any]):
         """Save lead information to storage (temporary - will connect to DB async later)"""
-        if call_sid not in lead_storage:
-            lead_storage[call_sid] = {
-                "call_sid": call_sid,
-                "timestamp": datetime.now().isoformat(),
-                "lead_quality": None,  # "Hot" or "Cold"
-                "data": {}
-            }
-        lead_storage[call_sid]["data"].update(data)
+        with lead_storage_lock:
+            if call_sid not in lead_storage:
+                lead_storage[call_sid] = {
+                    "call_sid": call_sid,
+                    "timestamp": datetime.now().isoformat(),
+                    "lead_quality": None,  # "Hot" or "Cold"
+                    "data": {}
+                }
+            lead_storage[call_sid]["data"].update(data)
         logger.info(f"Lead data saved for {call_sid}: {data}")
     
     # Initialize lead data tracking for this call
@@ -337,11 +336,11 @@ async def run_bot(websocket: WebSocket):
         ),
     )
     
-    # Use reserved services if available, otherwise create new instances
-    # Reserved services reduce cold-start latency by pre-initializing at startup
-    # Each call still gets its own pipeline, so services should handle concurrent usage
+    # Initialize services - Azure STT must be per-call due to session state
+    # Groq LLM/TTS can be shared as they're HTTP-based and stateless
     
-    # Initialize Azure STT for Arabic (KSA)
+    # Initialize Azure STT for Arabic (KSA) - ALWAYS create new instance per call
+    # Azure STT maintains recognition session state and cannot be reused across calls
     if not AZURE_SPEECH_KEY:
         raise ValueError("AZURE_SPEECH_API_KEY or AZURE_SPEECH_KEY environment variable is required")
     if not AZURE_SPEECH_REGION:
@@ -349,18 +348,13 @@ async def run_bot(websocket: WebSocket):
 
     # Use ar-SA as requested (Saudi Arabic)
     azure_language = os.getenv("AZURE_SPEECH_LANGUAGE", "ar-SA")
-    reserved_stt = get_reserved_service('stt')
-    if reserved_stt:
-        stt = reserved_stt
-        logger.info(f"Using reserved Azure STT (language={azure_language})")
-    else:
-        logger.info(f"Creating new Azure STT (language={azure_language})")
-        stt = AzureSTTService(
-            api_key=AZURE_SPEECH_KEY,
-            region=AZURE_SPEECH_REGION,
-            language=azure_language,
-            audio_passthrough=True,  # Allow audio to continue downstream for continuous recognition
-        )
+    logger.info(f"Creating new Azure STT instance for this call (language={azure_language})")
+    stt = AzureSTTService(
+        api_key=AZURE_SPEECH_KEY,
+        region=AZURE_SPEECH_REGION,
+        language=azure_language,
+        audio_passthrough=True,  # Allow audio to continue downstream for continuous recognition
+    )
     
     # Initialize Groq LLM (openai/gpt-oss-120b) for high-quality, low-latency responses
     reserved_llm = get_reserved_service('llm')
