@@ -472,7 +472,7 @@ async def run_bot(websocket: WebSocket):
                         frame_id = id(frame)
                         if frame_id not in self._seen_frames:
                             self._seen_frames.add(frame_id)
-                            logger.info(f"🤖 LLM: {text}")
+                        logger.info(f"🤖 LLM: {text}")
                         # Clean up old frame IDs periodically to prevent memory leak
                         if len(self._seen_frames) > 100:
                             self._seen_frames.clear()
@@ -561,7 +561,7 @@ async def run_bot(websocket: WebSocket):
             enable_usage_metrics=True,    # Track token usage
         ),
         cancel_on_idle_timeout=True,      # Enable idle timeout as safety net
-        idle_timeout_seconds=1800,        # 30 minutes - long enough for real calls
+        idle_timeout_secs=1800,          # 30 minutes - long enough for real calls
     )
     
     
